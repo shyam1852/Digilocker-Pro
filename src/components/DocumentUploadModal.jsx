@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { X, UploadCloud, Lock, FileText, CheckCircle, AlertCircle } from 'lucide-react';
+import { X, UploadCloud, Lock, FileText, CheckCircle, AlertCircle, KeyRound, Unlock } from 'lucide-react';
 import { useVault } from '../context/VaultContext';
+import { useAuth } from '../context/AuthContext';
 
 const CATEGORIES = [
   'Health Insurance',
@@ -13,6 +14,7 @@ const CATEGORIES = [
 
 export default function DocumentUploadModal({ isOpen, onClose }) {
   const { uploadDocument } = useVault();
+  const { vaultKey, unlockVault, user } = useAuth();
 
   const [title, setTitle] = useState('');
   const [category, setCategory] = useState('Health Insurance');
@@ -21,6 +23,8 @@ export default function DocumentUploadModal({ isOpen, onClose }) {
   const [expiryDate, setExpiryDate] = useState('');
   const [file, setFile] = useState(null);
 
+  const [unlockPassphrase, setUnlockPassphrase] = useState('');
+  const [unlocking, setUnlocking] = useState(false);
   const [encrypting, setEncrypting] = useState(false);
   const [error, setError] = useState('');
 
@@ -36,6 +40,26 @@ export default function DocumentUploadModal({ isOpen, onClose }) {
     }
   };
 
+  const handleUnlock = async (pass) => {
+    const passwordToUse = pass || unlockPassphrase;
+    if (!passwordToUse) {
+      setError('Please enter your master passphrase to unlock.');
+      return false;
+    }
+    setUnlocking(true);
+    setError('');
+    try {
+      await unlockVault(passwordToUse);
+      setError('');
+      return true;
+    } catch (err) {
+      setError(err.message || 'Passphrase verification failed.');
+      return false;
+    } finally {
+      setUnlocking(false);
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
@@ -47,6 +71,20 @@ export default function DocumentUploadModal({ isOpen, onClose }) {
     if (!title.trim()) {
       setError('Document title is required.');
       return;
+    }
+
+    // Auto-unlock if passphrase provided or if demo account
+    if (!vaultKey) {
+      let unlocked = false;
+      if (unlockPassphrase) {
+        unlocked = await handleUnlock(unlockPassphrase);
+      } else if (user?.username === 'shyamkeshri') {
+        unlocked = await handleUnlock('Password123!');
+      }
+      if (!unlocked) {
+        setError('Vault is locked. Please enter your master passphrase below to unlock in-memory encryption.');
+        return;
+      }
     }
 
     setEncrypting(true);
@@ -88,6 +126,63 @@ export default function DocumentUploadModal({ isOpen, onClose }) {
             <X size={18} />
           </button>
         </div>
+
+        {/* Vault Unlock Card if key not in memory */}
+        {!vaultKey && (
+          <div style={{
+            padding: '0.85rem',
+            borderRadius: 'var(--radius-md)',
+            backgroundColor: 'var(--bg-surface)',
+            border: '1px solid var(--border-regular)',
+            marginBottom: '1.25rem'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.35rem', fontWeight: 600, fontSize: '0.825rem', color: 'var(--text-primary)' }}>
+              <KeyRound size={15} style={{ color: 'var(--accent)' }} />
+              <span>Vault Locked in Current Session</span>
+            </div>
+            <p style={{ fontSize: '0.73rem', color: 'var(--text-muted)', marginBottom: '0.75rem' }}>
+              Enter your master passphrase to activate client-side AES-256-GCM encryption:
+            </p>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              <input
+                type="password"
+                value={unlockPassphrase}
+                onChange={(e) => setUnlockPassphrase(e.target.value)}
+                placeholder="Enter Master Passphrase"
+                className="input-control"
+                style={{ padding: '0.4rem 0.65rem', fontSize: '0.8rem' }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleUnlock();
+                  }
+                }}
+              />
+              <button
+                type="button"
+                onClick={() => handleUnlock()}
+                disabled={unlocking}
+                className="btn btn-primary btn-sm"
+                style={{ padding: '0 0.85rem' }}
+              >
+                <Unlock size={13} />
+                <span>{unlocking ? 'Unlocking...' : 'Unlock Vault'}</span>
+              </button>
+            </div>
+            {user?.username === 'shyamkeshri' && (
+              <div style={{ marginTop: '0.5rem' }}>
+                <button
+                  type="button"
+                  onClick={() => handleUnlock('Password123!')}
+                  className="btn btn-secondary btn-sm"
+                  style={{ fontSize: '0.72rem', padding: '0.2rem 0.5rem' }}
+                >
+                  Quick-Unlock Demo Vault (Password123!)
+                </button>
+              </div>
+            )}
+          </div>
+        )}
 
         {error && (
           <div style={{

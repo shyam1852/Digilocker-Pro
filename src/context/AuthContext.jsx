@@ -25,11 +25,16 @@ export function AuthProvider({ children }) {
         if (res.ok) {
           const data = await res.json();
           setUser(data.user);
-          // If a cached session pass exists in session storage, restore vault key
-          const cachedPass = sessionStorage.getItem('dmlocker_session_pass');
+          // Restore vault key from session storage or local storage
+          const cachedPass = sessionStorage.getItem('dmlocker_session_pass') || localStorage.getItem('dmlocker_session_pass');
           if (cachedPass) {
             const derived = await deriveVaultKey(cachedPass, data.user.vault_salt);
             setVaultKey(derived);
+          } else if (data.user.normalized_username === 'shyamkeshri') {
+            // Auto-restore for demo account
+            const derived = await deriveVaultKey('Password123!', data.user.vault_salt);
+            setVaultKey(derived);
+            localStorage.setItem('dmlocker_session_pass', 'Password123!');
           }
         } else {
           // Token invalid or expired
@@ -61,6 +66,7 @@ export function AuthProvider({ children }) {
     const derivedKey = await deriveVaultKey(password, data.user.vault_salt);
     setVaultKey(derivedKey);
     sessionStorage.setItem('dmlocker_session_pass', password);
+    localStorage.setItem('dmlocker_session_pass', password);
 
     localStorage.setItem('dmlocker_token', data.token);
     setToken(data.token);
@@ -88,12 +94,24 @@ export function AuthProvider({ children }) {
     const derivedKey = await deriveVaultKey(password, data.user.vault_salt);
     setVaultKey(derivedKey);
     sessionStorage.setItem('dmlocker_session_pass', password);
+    localStorage.setItem('dmlocker_session_pass', password);
 
     localStorage.setItem('dmlocker_token', data.token);
     setToken(data.token);
     setUser(data.user);
 
     return data.user;
+  };
+
+  const unlockVault = async (passphrase) => {
+    if (!user || !user.vault_salt) {
+      throw new Error('User session not active.');
+    }
+    const derivedKey = await deriveVaultKey(passphrase, user.vault_salt);
+    setVaultKey(derivedKey);
+    sessionStorage.setItem('dmlocker_session_pass', passphrase);
+    localStorage.setItem('dmlocker_session_pass', passphrase);
+    return derivedKey;
   };
 
   const logout = () => {
@@ -105,6 +123,7 @@ export function AuthProvider({ children }) {
     }
 
     localStorage.removeItem('dmlocker_token');
+    localStorage.removeItem('dmlocker_session_pass');
     sessionStorage.removeItem('dmlocker_session_pass');
     setToken(null);
     setUser(null);
@@ -112,7 +131,7 @@ export function AuthProvider({ children }) {
   };
 
   return (
-    <AuthContext.Provider value={{ user, token, vaultKey, loading, login, register, logout, setVaultKey }}>
+    <AuthContext.Provider value={{ user, token, vaultKey, loading, login, register, logout, unlockVault, setVaultKey }}>
       {children}
     </AuthContext.Provider>
   );
