@@ -15,12 +15,18 @@ import {
   generateSessionToken,
   requireAuth
 } from './auth.js';
-import { runTinyFishRenewalAgent, runTinyFishPolicyHealthAgent } from './tinyfish.js';
+import {
+  runTinyFishRenewalAgent,
+  runTinyFishPolicyHealthAgent,
+  isLiveMode,
+  getSupportedPublicInsuranceUrl
+} from './tinyfish.js';
 import { seedDemoData } from './seed.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+dotenv.config({ path: path.join(__dirname, '../.env') });
 dotenv.config();
 
 const app = express();
@@ -426,24 +432,35 @@ app.get('/api/renewals', requireAuth, (req, res) => {
 /**
  * POST /api/renewals/dispatch
  * Dispatches TinyFish agent for document renewal.
+ * Supports real autonomous agent execution on supported public insurance pages
+ * when TINYFISH_API_KEY is configured, or transparent development simulation otherwise.
  */
 app.post('/api/renewals/dispatch', requireAuth, async (req, res) => {
-  const { document_id, current_premium } = req.body;
+  const { document_id, current_premium, target_url } = req.body;
 
   const doc = db.prepare('SELECT * FROM documents WHERE id = ? AND user_id = ?').get(document_id, req.user.id);
   if (!doc) {
     return res.status(404).json({ error: 'Document not found or access denied.' });
   }
 
+  const targetUrl = target_url || getSupportedPublicInsuranceUrl(doc.insurer_name, doc.category);
+
   // Execute TinyFish Agent
   const agentResult = await runTinyFishRenewalAgent({
     policyNumber: doc.policy_number || 'POL-DEFAULT',
     insurerName: doc.insurer_name || 'National Underwriters',
-    currentPremium: Number(current_premium) || 18500
+    currentPremium: Number(current_premium) || 18500,
+    category: doc.category,
+    targetUrl
   });
 
   if (agentResult.status === 'failed') {
-    return res.status(502).json({ error: agentResult.error });
+    return res.status(502).json({
+      error: agentResult.error,
+      code: agentResult.error_code,
+      run_id: agentResult.run_id,
+      is_simulation: false
+    });
   }
 
   const workflowId = `rnw_${crypto.randomBytes(6).toString('hex')}`;
@@ -578,17 +595,29 @@ app.get('/api/health-checks', requireAuth, (req, res) => {
  * POST /api/health-checks/run
  */
 app.post('/api/health-checks/run', requireAuth, async (req, res) => {
-  const { document_id } = req.body;
+  const { document_id, target_url } = req.body;
   const doc = db.prepare('SELECT * FROM documents WHERE id = ? AND user_id = ?').get(document_id, req.user.id);
   if (!doc) {
     return res.status(404).json({ error: 'Document not found or access denied.' });
   }
 
+  const targetUrl = target_url || getSupportedPublicInsuranceUrl(doc.insurer_name, doc.category);
+
   const agentResult = await runTinyFishPolicyHealthAgent({
     policyNumber: doc.policy_number || 'POL-DEFAULT',
     insurerName: doc.insurer_name || 'Underwriter Group',
-    policyTitle: doc.title
+    policyTitle: doc.title,
+    category: doc.category,
+    targetUrl
   });
+
+  if (agentResult.status === 'failed') {
+    return res.status(502).json({
+      error: agentResult.error,
+      code: agentResult.error_code,
+      is_simulation: false
+    });
+  }
 
   const checkId = `hlth_${crypto.randomBytes(6).toString('hex')}`;
   const now = new Date().toISOString();
@@ -907,6 +936,20 @@ app.patch('/api/user/profile', requireAuth, (req, res) => {
 });
 
 /* ==========================================================================
+   TINYFISH INTEGRATION STATUS ENDPOINT
+   ========================================================================== */
+
+app.get('/api/tinyfish/status', (req, res) => {
+  const isLive = isLiveMode();
+  res.json({
+    is_live: isLive,
+    mode: isLive ? 'LIVE' : 'SIMULATION',
+    label: isLive ? 'LIVE AGENT API' : 'DEVELOPMENT SIMULATION (MOCK PORTAL)',
+    api_url: process.env.TINYFISH_API_URL || 'https://agent.tinyfish.ai'
+  });
+});
+
+/* ==========================================================================
    STATIC FRONTEND SERVING (For production single-port execution)
    ========================================================================== */
 
@@ -925,8 +968,9 @@ if (fs.existsSync(distPath)) {
    START SERVER
    ========================================================================== */
 
-app.listen(PORT, () => {
-  console.log(`[DM Locker Pro Backend] Server running on http://localhost:${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[DM Locker Pro Backend] Server running on http://0.0.0.0:${PORT}`);
   console.log(`[Database] SQLite connected at server/data/dmlocker.db`);
-  console.log(`[TinyFish] Mode: ${process.env.TINYFISH_API_KEY ? 'LIVE AGENT API' : 'DEVELOPMENT SIMULATION (MOCK PORTAL)'}`);
+  console.log(`[TinyFish] Mode: ${isLiveMode() ? 'LIVE AGENT API' : 'DEVELOPMENT SIMULATION (MOCK PORTAL)'}`);
 });
+

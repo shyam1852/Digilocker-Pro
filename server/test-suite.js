@@ -159,8 +159,8 @@ async function runTests() {
       renewalRes.status === 201 &&
       renewalData.workflow.status === 'quote_ready' &&
       renewalData.agentResult.quote_ref &&
-      renewalData.agentResult.source_label.includes('SIMULATION'),
-      '8. TinyFish Renewal Agent dispatches with telemetry & transparent simulation label'
+      (renewalData.agentResult.source_label.includes('SIMULATION') || renewalData.agentResult.source_label.includes('LIVE')),
+      '8. TinyFish Renewal Agent dispatches with telemetry & transparent engine label'
     );
     const workflowId = renewalData.workflow.id;
 

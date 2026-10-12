@@ -1,13 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   RefreshCw,
-  Clock,
   ShieldCheck,
   CheckCircle2,
   AlertTriangle,
-  ArrowRight,
-  ExternalLink,
-  Archive,
   Terminal,
   Activity,
   Check
@@ -19,16 +15,51 @@ export default function RenewalCenterPage() {
 
   const [selectedDocId, setSelectedDocId] = useState('');
   const [estimatedPremium, setEstimatedPremium] = useState('18500');
+  const [targetUrl, setTargetUrl] = useState('');
+  const [engineStatus, setEngineStatus] = useState(null);
   const [dispatching, setDispatching] = useState(false);
   const [activeWorkflow, setActiveWorkflow] = useState(null);
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
 
+  // Fetch engine operational mode
+  useEffect(() => {
+    fetch('/api/tinyfish/status')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data) setEngineStatus(data);
+      })
+      .catch(() => {});
+  }, []);
+
   // Eligible insurance documents
   const eligibleDocs = documents.filter((d) =>
     ['Health Insurance', 'Life Insurance', 'Vehicle Insurance'].includes(d.category) && d.status !== 'archived'
   );
+
+  // Auto-populate recommended public insurance portal URL when policy changes
+  const handleDocChange = (docId) => {
+    setSelectedDocId(docId);
+    if (!docId) {
+      setTargetUrl('');
+      return;
+    }
+    const doc = documents.find((d) => d.id === docId);
+    if (doc) {
+      const cat = (doc.category || '').toLowerCase();
+      const ins = (doc.insurer_name || '').toLowerCase();
+      if (ins.includes('star health') || cat.includes('health')) {
+        setTargetUrl('https://en.wikipedia.org/wiki/Health_insurance');
+      } else if (ins.includes('hdfc') || cat.includes('life')) {
+        setTargetUrl('https://en.wikipedia.org/wiki/Life_insurance');
+      } else if (ins.includes('icici') || cat.includes('vehicle') || cat.includes('motor')) {
+        setTargetUrl('https://en.wikipedia.org/wiki/Vehicle_insurance');
+      } else {
+        setTargetUrl('https://en.wikipedia.org/wiki/Insurance_policy');
+      }
+    }
+  };
 
   const handleStartRenewal = async () => {
     if (!selectedDocId) {
@@ -40,7 +71,7 @@ export default function RenewalCenterPage() {
     setDispatching(true);
 
     try {
-      const res = await dispatchRenewal(selectedDocId, estimatedPremium);
+      const res = await dispatchRenewal(selectedDocId, estimatedPremium, targetUrl);
       setActiveWorkflow(res.workflow);
     } catch (err) {
       setError(err.message || 'Renewal agent execution failed.');
@@ -66,13 +97,32 @@ export default function RenewalCenterPage() {
   return (
     <div className="page-container">
       {/* Header */}
-      <div style={{ marginBottom: '1.5rem' }}>
-        <h2 style={{ fontSize: '1.2rem', fontWeight: 600, color: 'var(--text-primary)' }}>
-          Self-Healing Locker — Renewal Center
-        </h2>
-        <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
-          Autonomous TinyFish web agent integration for policy renewal rate retrieval & version archival
-        </p>
+      <div style={{ marginBottom: '1.5rem', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '1rem' }}>
+        <div>
+          <h2 style={{ fontSize: '1.2rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+            Self-Healing Locker — Renewal Center
+          </h2>
+          <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+            Autonomous TinyFish web agent integration for policy renewal rate retrieval & version archival
+          </p>
+        </div>
+
+        {/* Engine Operational Mode Pill */}
+        {engineStatus && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            {engineStatus.is_live ? (
+              <span className="badge badge-success" style={{ padding: '0.35rem 0.75rem', fontSize: '0.72rem', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                <span style={{ width: '7px', height: '7px', borderRadius: '50%', backgroundColor: 'currentColor', display: 'inline-block' }} />
+                LIVE AGENT API (TINYFISH_API_KEY Active)
+              </span>
+            ) : (
+              <span className="badge badge-simulation" style={{ padding: '0.35rem 0.75rem', fontSize: '0.72rem', display: 'inline-flex', alignItems: 'center', gap: '0.35rem' }}>
+                <span style={{ width: '7px', height: '7px', borderRadius: '50%', backgroundColor: 'currentColor', display: 'inline-block' }} />
+                MOCK SANDBOX (DEVELOPMENT SIMULATION)
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Disclaimers & Safety Notice */}
@@ -96,15 +146,19 @@ export default function RenewalCenterPage() {
 
       {error && (
         <div style={{
-          padding: '0.75rem',
+          padding: '0.75rem 1rem',
           backgroundColor: 'var(--status-danger-bg)',
           color: 'var(--status-danger)',
           borderRadius: 'var(--radius-md)',
           marginBottom: '1.25rem',
           fontSize: '0.8rem',
-          border: '1px solid rgba(239, 68, 68, 0.25)'
+          border: '1px solid rgba(239, 68, 68, 0.25)',
+          display: 'flex',
+          alignItems: 'flex-start',
+          gap: '0.5rem'
         }}>
-          {error}
+          <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+          <div>{error}</div>
         </div>
       )}
 
@@ -131,16 +185,16 @@ export default function RenewalCenterPage() {
         <div className="card-header">
           <div>
             <h3 className="card-title">Dispatch Renewal Agent</h3>
-            <p className="card-subtitle">Select an existing policy in your vault to query underwriter portals</p>
+            <p className="card-subtitle">Select an existing policy in your vault to query underwriter portals or public insurance pages</p>
           </div>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr auto', gap: '0.75rem', alignItems: 'flex-end' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: '1.2fr 1fr 1.5fr auto', gap: '0.75rem', alignItems: 'flex-end' }}>
           <div className="input-group" style={{ marginBottom: 0 }}>
             <label className="input-label">Select Policy Document</label>
             <select
               value={selectedDocId}
-              onChange={(e) => setSelectedDocId(e.target.value)}
+              onChange={(e) => handleDocChange(e.target.value)}
               className="input-control"
             >
               <option value="">-- Choose Monitored Policy --</option>
@@ -153,7 +207,7 @@ export default function RenewalCenterPage() {
           </div>
 
           <div className="input-group" style={{ marginBottom: 0 }}>
-            <label className="input-label">Current / Base Annual Premium (₹)</label>
+            <label className="input-label">Current Premium (₹)</label>
             <input
               type="number"
               value={estimatedPremium}
@@ -163,11 +217,22 @@ export default function RenewalCenterPage() {
             />
           </div>
 
+          <div className="input-group" style={{ marginBottom: 0 }}>
+            <label className="input-label">Target Public Portal / Info Page</label>
+            <input
+              type="url"
+              value={targetUrl}
+              onChange={(e) => setTargetUrl(e.target.value)}
+              className="input-control"
+              placeholder="https://..."
+            />
+          </div>
+
           <button
             onClick={handleStartRenewal}
             disabled={dispatching || !selectedDocId}
             className="btn btn-primary"
-            style={{ height: '38px', padding: '0 1.25rem' }}
+            style={{ height: '38px', padding: '0 1.25rem', whiteSpace: 'nowrap' }}
           >
             <RefreshCw size={14} className={dispatching ? 'spin' : ''} />
             <span>{dispatching ? 'Agent Running...' : 'Start Renewal Workflow'}</span>

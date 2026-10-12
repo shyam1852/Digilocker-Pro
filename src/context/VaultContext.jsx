@@ -134,15 +134,19 @@ export function VaultProvider({ children }) {
   };
 
   // Dispatch renewal workflow
-  const dispatchRenewal = async (docId, currentPremium) => {
+  const dispatchRenewal = async (docId, currentPremium, targetUrl) => {
     const res = await fetch('/api/renewals/dispatch', {
       method: 'POST',
       headers: authHeaders(),
-      body: JSON.stringify({ document_id: docId, current_premium: currentPremium })
+      body: JSON.stringify({
+        document_id: docId,
+        current_premium: currentPremium,
+        target_url: targetUrl || undefined
+      })
     });
     if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to dispatch renewal agent');
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Failed to dispatch renewal agent (${res.status})`);
     }
     const data = await res.json();
     await refreshAll();
@@ -156,22 +160,25 @@ export function VaultProvider({ children }) {
       headers: authHeaders()
     });
     if (!res.ok) {
-      const err = await res.json();
+      const err = await res.json().catch(() => ({}));
       throw new Error(err.error || 'Failed to confirm renewal');
     }
     await refreshAll();
   };
 
   // Run policy health check
-  const runHealthCheck = async (docId) => {
+  const runHealthCheck = async (docId, targetUrl) => {
     const res = await fetch('/api/health-checks/run', {
       method: 'POST',
       headers: authHeaders(),
-      body: JSON.stringify({ document_id: docId })
+      body: JSON.stringify({
+        document_id: docId,
+        target_url: targetUrl || undefined
+      })
     });
     if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.error || 'Failed to run policy health check');
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Failed to run policy health check (${res.status})`);
     }
     const data = await res.json();
     await refreshAll();
