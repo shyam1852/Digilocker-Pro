@@ -2,6 +2,9 @@ import express from 'express';
 import cors from 'cors';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
+import path from 'path';
+import fs from 'fs';
+import { fileURLToPath } from 'url';
 import db from './db.js';
 import {
   normalizeUsername,
@@ -14,6 +17,9 @@ import {
 } from './auth.js';
 import { runTinyFishRenewalAgent, runTinyFishPolicyHealthAgent } from './tinyfish.js';
 import { seedDemoData } from './seed.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 dotenv.config();
 
@@ -899,6 +905,21 @@ app.patch('/api/user/profile', requireAuth, (req, res) => {
 
   res.json({ success: true, message: 'Profile updated.' });
 });
+
+/* ==========================================================================
+   STATIC FRONTEND SERVING (For production single-port execution)
+   ========================================================================== */
+
+const distPath = path.join(__dirname, '../dist');
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+  app.use((req, res, next) => {
+    if (req.method === 'GET' && !req.path.startsWith('/api')) {
+      return res.sendFile(path.join(distPath, 'index.html'));
+    }
+    next();
+  });
+}
 
 /* ==========================================================================
    START SERVER
