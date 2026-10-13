@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { useAuth } from './AuthContext';
-import { encryptData, decryptData } from '../utils/crypto';
+import { encryptData, decryptData, encryptDocumentPackage, decryptMetadata } from '../utils/crypto';
 
 const VaultContext = createContext();
 
@@ -8,6 +8,8 @@ export function VaultProvider({ children }) {
   const { token, vaultKey, user } = useAuth();
 
   const [documents, setDocuments] = useState([]);
+  const [folders, setFolders] = useState([]);
+  const [duplicates, setDuplicates] = useState([]);
   const [renewals, setRenewals] = useState([]);
   const [healthChecks, setHealthChecks] = useState([]);
   const [claims, setClaims] = useState([]);
@@ -25,8 +27,10 @@ export function VaultProvider({ children }) {
     if (!token) return;
     setLoading(true);
     try {
-      const [docsRes, renRes, hlthRes, clmRes, actRes, emgRes] = await Promise.all([
+      const [docsRes, fldRes, dupRes, renRes, hlthRes, clmRes, actRes, emgRes] = await Promise.all([
         fetch('/api/documents', { headers: authHeaders() }),
+        fetch('/api/folders', { headers: authHeaders() }),
+        fetch('/api/vault/duplicates', { headers: authHeaders() }),
         fetch('/api/renewals', { headers: authHeaders() }),
         fetch('/api/health-checks', { headers: authHeaders() }),
         fetch('/api/nominee-claims', { headers: authHeaders() }),
@@ -37,6 +41,14 @@ export function VaultProvider({ children }) {
       if (docsRes.ok) {
         const d = await docsRes.json();
         setDocuments(d.documents);
+      }
+      if (fldRes.ok) {
+        const f = await fldRes.json();
+        setFolders(f.folders || []);
+      }
+      if (dupRes.ok) {
+        const dp = await dupRes.json();
+        setDuplicates(dp.duplicates || []);
       }
       if (renRes.ok) {
         const r = await renRes.json();
@@ -78,8 +90,21 @@ export function VaultProvider({ children }) {
     }
 
     const fileBuffer = await file.arrayBuffer();
-    // Perform AES-256-GCM encryption in the browser
-    const { ciphertextBase64, ivBase64 } = await encryptData(fileBuffer, vaultKey);
+    // Perform AES-256-GCM encryption in the browser with independent nonces for file and metadata
+    const {
+      encrypted_blob,
+      encryption_iv,
+      encrypted_metadata,
+      metadata_iv
+    } = await encryptDocumentPackage(fileBuffer, {
+      title: metadata.title || file.name,
+      policy_number: metadata.policy_number || '',
+      insurer_name: metadata.insurer_name || '',
+      expiry_date: metadata.expiry_date || null,
+      category: metadata.category || 'Other Records',
+      coverage_terms: metadata.coverage_terms || null,
+      extracted_fields: metadata.extracted_fields || null
+    }, vaultKey);
 
     const payload = {
       title: metadata.title || file.name,
@@ -87,8 +112,10 @@ export function VaultProvider({ children }) {
       policy_number: metadata.policy_number || '',
       insurer_name: metadata.insurer_name || '',
       expiry_date: metadata.expiry_date || null,
-      encrypted_blob: ciphertextBase64,
-      encryption_iv: ivBase64,
+      encrypted_blob,
+      encryption_iv,
+      encrypted_metadata,
+      metadata_iv,
       file_name: file.name,
       file_type: file.type || 'application/octet-stream',
       file_size_bytes: file.size
@@ -106,6 +133,7 @@ export function VaultProvider({ children }) {
     }
 
     await refreshAll();
+
   };
 
   // Decrypt document on client
@@ -233,9 +261,141 @@ export function VaultProvider({ children }) {
     await refreshAll();
   };
 
+  // Update document expiry date and category
+  const updateDocumentExpiry = async (docId, expiryDate, category) => {
+    const res = await fetch(`/api/documents/${docId}/expiry`, {
+      method: 'PATCH',
+      headers: authHeaders(),
+      body: JSON.stringify({ expiry_date: expiryDate, category })
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to update expiry date');
+    }
+    const data = await res.json();
+    await refreshAll();
+    return data.document;
+  };
+
+  // Toggle reminders on a specific document
+  const toggleDocumentReminders = async (docId, enabled) => {
+    const res = await fetch(`/api/documents/${docId}/reminders`, {
+      method: 'PATCH',
+      headers: authHeaders(),
+      body: JSON.stringify({ reminders_enabled: enabled })
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to toggle reminders');
+    }
+    await refreshAll();
+  };
+
+  // Create custom folder
+  const createFolder = async (folderData) => {
+    const res = await fetch('/api/folders', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify(folderData)
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to create folder');
+    }
+    const data = await res.json();
+    await refreshAll();
+    return data.folder;
+  };
+
+  // Update folder
+  const updateFolder = async (folderId, folderData) => {
+    const res = await fetch(`/api/folders/${folderId}`, {
+      method: 'PATCH',
+      headers: authHeaders(),
+      body: JSON.stringify(folderData)
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to update folder');
+    }
+    await refreshAll();
+  };
+
+  // Delete folder
+  const deleteFolder = async (folderId) => {
+    const res = await fetch(`/api/folders/${folderId}`, {
+      method: 'DELETE',
+      headers: authHeaders()
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to delete folder');
+    }
+    await refreshAll();
+  };
+
+  // Move documents to folder
+  const moveDocuments = async (documentIds, folderId) => {
+    const res = await fetch('/api/documents/move-folder', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ document_ids: documentIds, folder_id: folderId })
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to move documents');
+    }
+    const data = await res.json();
+    await refreshAll();
+    return data;
+  };
+
+  // Bulk categorize documents
+  const bulkCategorize = async (documentIds, category) => {
+    const res = await fetch('/api/documents/bulk-categorize', {
+      method: 'POST',
+      headers: authHeaders(),
+      body: JSON.stringify({ document_ids: documentIds, category })
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to categorize documents');
+    }
+    const data = await res.json();
+    await refreshAll();
+    return data;
+  };
+
+  // Undo last organization action
+  const undoLastAction = async () => {
+    const res = await fetch('/api/vault/undo', {
+      method: 'POST',
+      headers: authHeaders()
+    });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.error || 'Failed to undo action');
+    }
+    const data = await res.json();
+    await refreshAll();
+    return data;
+  };
+
+  // Refresh duplicates
+  const refreshDuplicates = async () => {
+    const res = await fetch('/api/vault/duplicates', { headers: authHeaders() });
+    if (res.ok) {
+      const data = await res.json();
+      setDuplicates(data.duplicates || []);
+      return data.duplicates;
+    }
+  };
+
   return (
     <VaultContext.Provider value={{
       documents,
+      folders,
+      duplicates,
       renewals,
       healthChecks,
       claims,
@@ -246,6 +406,15 @@ export function VaultProvider({ children }) {
       uploadDocument,
       decryptDocument,
       deleteDocument,
+      updateDocumentExpiry,
+      toggleDocumentReminders,
+      createFolder,
+      updateFolder,
+      deleteFolder,
+      moveDocuments,
+      bulkCategorize,
+      undoLastAction,
+      refreshDuplicates,
       dispatchRenewal,
       confirmRenewal,
       runHealthCheck,

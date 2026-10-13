@@ -9,6 +9,7 @@ import {
   Check
 } from 'lucide-react';
 import { useVault } from '../context/VaultContext';
+import ExpiryAlertsManager from '../components/ExpiryAlertsManager';
 
 export default function RenewalCenterPage() {
   const { documents, renewals, dispatchRenewal, confirmRenewal } = useVault();
@@ -409,6 +410,9 @@ export default function RenewalCenterPage() {
           </div>
         )}
       </div>
+
+      {/* Smart Expiry Alerts & Email Reminders Section */}
+      <ExpiryAlertsManager onSelectPolicyForRenewal={handleDocChange} />
     </div>
   );
 }

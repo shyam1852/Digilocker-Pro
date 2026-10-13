@@ -131,6 +131,61 @@ export async function decryptData(ciphertextBase64, ivBase64, vaultKey) {
 }
 
 /**
+ * Encrypts both document buffer and sensitive metadata with independent, unique 96-bit nonces.
+ * Strictly guarantees nonce uniqueness (never reuses an IV for document and metadata).
+ */
+export async function encryptDocumentPackage(fileBuffer, sensitiveMetadata, vaultKey) {
+  // 1. Independent 12-byte IV for file payload
+  const fileIv = window.crypto.getRandomValues(new Uint8Array(12));
+  const fileCipherBuffer = await window.crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: fileIv, tagLength: 128 },
+    vaultKey,
+    fileBuffer
+  );
+
+  // 2. Independent 12-byte IV for metadata payload
+  const metaIv = window.crypto.getRandomValues(new Uint8Array(12));
+  const metaPlainBytes = new TextEncoder().encode(JSON.stringify(sensitiveMetadata));
+  const metaCipherBuffer = await window.crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: metaIv, tagLength: 128 },
+    vaultKey,
+    metaPlainBytes
+  );
+
+  return {
+    encrypted_blob: bufferToBase64(fileCipherBuffer),
+    encryption_iv: bufferToBase64(fileIv),
+    encrypted_metadata: bufferToBase64(metaCipherBuffer),
+    metadata_iv: bufferToBase64(metaIv)
+  };
+}
+
+/**
+ * Decrypts sensitive metadata payload
+ */
+export async function decryptMetadata(encryptedMetadataBase64, metadataIvBase64, vaultKey) {
+  if (!encryptedMetadataBase64 || !metadataIvBase64) return null;
+  try {
+    const decryptedBuffer = await decryptData(encryptedMetadataBase64, metadataIvBase64, vaultKey);
+    const jsonStr = new TextDecoder().decode(decryptedBuffer);
+    return JSON.parse(jsonStr);
+  } catch (err) {
+    console.warn('Metadata decryption skipped or tag mismatch:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Computes cryptographically secure SHA-256 hex digest
+ */
+export async function sha256Hex(message) {
+  const enc = new TextEncoder();
+  const data = enc.encode(message);
+  const hashBuffer = await window.crypto.subtle.digest('SHA-256', data);
+  return bytesToHex(new Uint8Array(hashBuffer));
+}
+
+/**
  * Helper to download decrypted buffer as a file
  */
 export function downloadFile(buffer, fileName, mimeType = 'application/octet-stream') {
@@ -144,3 +199,4 @@ export function downloadFile(buffer, fileName, mimeType = 'application/octet-str
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
 }
+

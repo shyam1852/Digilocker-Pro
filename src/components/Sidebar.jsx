@@ -2,31 +2,42 @@ import React from 'react';
 import {
   LayoutDashboard,
   Shield,
+  FolderLock,
+  HeartPulse,
+  Landmark,
+  GraduationCap,
+  Sparkles,
   RefreshCw,
-  Activity,
-  Users,
   ShieldAlert,
-  History,
   Settings,
-  Lock,
   LogOut,
-  X
+  X,
+  ChevronLeft,
+  ChevronRight
 } from 'lucide-react';
 import ThemeSwitcher from './ThemeSwitcher';
 import { useAuth } from '../context/AuthContext';
 
 export const NAV_ITEMS = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { id: 'vault', label: 'Document Vault', icon: Shield },
-  { id: 'renewal', label: 'Renewal Center', icon: RefreshCw },
-  { id: 'health', label: 'Policy Health', icon: Activity },
-  { id: 'claims', label: 'Nominee Claim Pilot', icon: Users },
-  { id: 'emergency', label: 'Emergency Access', icon: ShieldAlert },
-  { id: 'activities', label: 'Activity Log', icon: History },
+  { id: 'vault', label: 'My Vault', icon: FolderLock },
+  { id: 'healthcare', label: 'Healthcare', icon: HeartPulse },
+  { id: 'finance', label: 'Finance & Insurance', icon: Landmark },
+  { id: 'career', label: 'Career & Education', icon: GraduationCap },
+  { id: 'assistant', label: 'DM Assistant', icon: Sparkles, badge: 'AI' },
+  { id: 'renewals', label: 'Renewals & Alerts', icon: RefreshCw },
+  { id: 'privacy', label: 'Privacy & Emergency', icon: ShieldAlert },
   { id: 'settings', label: 'Settings', icon: Settings },
 ];
 
-export default function Sidebar({ activeTab, onSelectTab, isOpen, onClose }) {
+export default function Sidebar({
+  activeTab,
+  onSelectTab,
+  isOpen,
+  onClose,
+  isCollapsed = false,
+  onToggleCollapse
+}) {
   const { user, logout } = useAuth();
 
   const handleNavClick = (id) => {
@@ -35,15 +46,42 @@ export default function Sidebar({ activeTab, onSelectTab, isOpen, onClose }) {
   };
 
   return (
-    <aside className={`app-sidebar ${isOpen ? 'open' : ''}`}>
+    <aside className={`app-sidebar ${isOpen ? 'open' : ''} ${isCollapsed ? 'collapsed' : ''}`}>
       {/* Brand Header */}
-      <div className="sidebar-header">
-        <div className="brand-mark">
-          <Shield size={18} strokeWidth={2.2} />
+      <div className="sidebar-header" style={{ position: 'relative' }}>
+        <div className="brand-mark" title="DM Locker Pro - AES-256-GCM Secure">
+          <Shield size={18} strokeWidth={2.4} />
         </div>
-        <div className="brand-text">DM Locker Pro</div>
-        <span className="brand-badge">SECURE</span>
+        {!isCollapsed && (
+          <>
+            <div className="brand-text">DM Locker Pro</div>
+            <span className="brand-badge">SECURE</span>
+          </>
+        )}
 
+        {/* Desktop Collapse Toggle */}
+        {onToggleCollapse && (
+          <button
+            onClick={onToggleCollapse}
+            className="collapse-toggle-btn hide-mobile"
+            title={isCollapsed ? 'Expand Sidebar' : 'Collapse Sidebar'}
+            style={{
+              marginLeft: 'auto',
+              background: 'transparent',
+              border: 'none',
+              color: 'var(--text-muted)',
+              cursor: 'pointer',
+              padding: '0.25rem',
+              display: 'flex',
+              alignItems: 'center',
+              borderRadius: 'var(--radius-sm)'
+            }}
+          >
+            {isCollapsed ? <ChevronRight size={15} /> : <ChevronLeft size={15} />}
+          </button>
+        )}
+
+        {/* Mobile Close Button */}
         {isOpen && (
           <button
             onClick={onClose}
@@ -66,9 +104,27 @@ export default function Sidebar({ activeTab, onSelectTab, isOpen, onClose }) {
               key={item.id}
               onClick={() => handleNavClick(item.id)}
               className={`nav-link ${isActive ? 'active' : ''}`}
+              title={isCollapsed ? item.label : undefined}
+              style={{ position: 'relative' }}
             >
-              <Icon size={16} strokeWidth={isActive ? 2.2 : 1.8} />
-              <span>{item.label}</span>
+              <Icon size={17} strokeWidth={isActive ? 2.3 : 1.8} />
+              {!isCollapsed && <span>{item.label}</span>}
+              {!isCollapsed && item.badge && (
+                <span
+                  style={{
+                    marginLeft: 'auto',
+                    fontSize: '0.62rem',
+                    padding: '0.1rem 0.35rem',
+                    borderRadius: '4px',
+                    fontWeight: 700,
+                    backgroundColor: 'rgba(59, 130, 246, 0.15)',
+                    color: '#60a5fa',
+                    border: '1px solid rgba(59, 130, 246, 0.3)'
+                  }}
+                >
+                  {item.badge}
+                </span>
+              )}
             </button>
           );
         })}
@@ -76,26 +132,29 @@ export default function Sidebar({ activeTab, onSelectTab, isOpen, onClose }) {
 
       {/* Permanent Bottom Theme Switcher & User Profile Footer */}
       <div className="sidebar-footer">
-        {/* Label for Theme Switcher */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 0.2rem' }}>
-          <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>
-            Appearance
-          </span>
-        </div>
+        {!isCollapsed && (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 0.2rem' }}>
+            <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600 }}>
+              Appearance
+            </span>
+          </div>
+        )}
 
         {/* Permanent Bottom Theme Switcher */}
-        <ThemeSwitcher />
+        <ThemeSwitcher isCompact={isCollapsed} />
 
         {/* User Card */}
         {user && (
-          <div className="user-profile-badge">
+          <div className="user-profile-badge" title={isCollapsed ? `@${user.username}` : undefined}>
             <div className="user-avatar">
               {user.username.slice(0, 1).toUpperCase()}
             </div>
-            <div className="user-meta">
-              <div className="user-name">@{user.username}</div>
-              <div className="user-role">{user.email}</div>
-            </div>
+            {!isCollapsed && (
+              <div className="user-meta">
+                <div className="user-name">@{user.username}</div>
+                <div className="user-role">{user.email}</div>
+              </div>
+            )}
             <button
               onClick={logout}
               title="Sign Out"
@@ -106,7 +165,8 @@ export default function Sidebar({ activeTab, onSelectTab, isOpen, onClose }) {
                 cursor: 'pointer',
                 padding: '0.2rem',
                 display: 'flex',
-                alignItems: 'center'
+                alignItems: 'center',
+                marginLeft: isCollapsed ? 0 : 'auto'
               }}
             >
               <LogOut size={15} />

@@ -1,14 +1,18 @@
 import React, { useState } from 'react';
-import { X, Lock, Download, Trash2, Calendar, FileText, ShieldAlert, CheckCircle, Eye } from 'lucide-react';
+import { X, Lock, Download, Trash2, Calendar, FileText, ShieldAlert, CheckCircle, Eye, Edit2, Check } from 'lucide-react';
 import { useVault } from '../context/VaultContext';
 import { downloadFile } from '../utils/crypto';
 
 export default function DocumentDetailModal({ document, isOpen, onClose }) {
-  const { decryptDocument, deleteDocument } = useVault();
+  const { decryptDocument, deleteDocument, updateDocumentExpiry } = useVault();
   const [decrypting, setDecrypting] = useState(false);
   const [previewContent, setPreviewContent] = useState(null);
   const [error, setError] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const [isEditingExpiry, setIsEditingExpiry] = useState(false);
+  const [expiryInput, setExpiryInput] = useState(document?.expiry_date || '');
+  const [savingExpiry, setSavingExpiry] = useState(false);
 
   if (!isOpen || !document) return null;
 
@@ -113,8 +117,74 @@ export default function DocumentDetailModal({ document, isOpen, onClose }) {
             </strong>
           </div>
           <div>
-            <span style={{ color: 'var(--text-muted)' }}>Expiry Date:</span>{' '}
-            <strong style={{ color: 'var(--text-primary)' }}>{document.expiry_date || 'No Expiration Set'}</strong>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span style={{ color: 'var(--text-muted)' }}>Expiry Date:</span>
+              {!isEditingExpiry && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExpiryInput(document.expiry_date || '');
+                    setIsEditingExpiry(true);
+                  }}
+                  style={{
+                    background: 'transparent',
+                    border: 'none',
+                    color: 'var(--accent)',
+                    cursor: 'pointer',
+                    fontSize: '0.72rem',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.2rem',
+                    padding: 0
+                  }}
+                >
+                  <Edit2 size={11} />
+                  <span>Edit</span>
+                </button>
+              )}
+            </div>
+
+            {isEditingExpiry ? (
+              <div style={{ display: 'flex', gap: '0.35rem', marginTop: '0.25rem' }}>
+                <input
+                  type="date"
+                  value={expiryInput}
+                  onChange={(e) => setExpiryInput(e.target.value)}
+                  className="input-control"
+                  style={{ fontSize: '0.75rem', padding: '0.2rem 0.4rem', fontFamily: 'var(--font-mono)' }}
+                />
+                <button
+                  type="button"
+                  disabled={savingExpiry}
+                  onClick={async () => {
+                    setSavingExpiry(true);
+                    setError('');
+                    try {
+                      await updateDocumentExpiry(document.id, expiryInput || null, document.category);
+                      setIsEditingExpiry(false);
+                    } catch (err) {
+                      setError(err.message);
+                    } finally {
+                      setSavingExpiry(false);
+                    }
+                  }}
+                  className="btn btn-primary btn-sm"
+                  style={{ padding: '0.2rem 0.5rem', fontSize: '0.72rem' }}
+                >
+                  {savingExpiry ? '...' : <Check size={12} />}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsEditingExpiry(false)}
+                  className="btn btn-secondary btn-sm"
+                  style={{ padding: '0.2rem 0.5rem', fontSize: '0.72rem' }}
+                >
+                  <X size={12} />
+                </button>
+              </div>
+            ) : (
+              <strong style={{ color: 'var(--text-primary)' }}>{document.expiry_date || 'No Expiration Set'}</strong>
+            )}
           </div>
         </div>
 

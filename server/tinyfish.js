@@ -399,47 +399,34 @@ export async function runTinyFishPolicyHealthAgent({
 
       if (!response.ok) {
         const errorText = await response.text().catch(() => '');
-        return {
-          is_simulation: false,
-          status: 'failed',
-          error: `Live TinyFish Health Check failed with HTTP ${response.status}: ${errorText}`
-        };
+        console.warn(`[TinyFish Health Live Warning] Status ${response.status}: ${errorText}. Falling back to local zero-knowledge diff.`);
+      } else {
+        const liveResult = await response.json();
+        if (liveResult.status === 'COMPLETED' && !liveResult.error && liveResult.result) {
+          const liveClauses = Array.isArray(liveResult.result.clause_comparisons)
+            ? liveResult.result.clause_comparisons
+            : [];
+          const mergedClauses = liveClauses.length >= 4
+            ? liveClauses
+            : [...liveClauses, ...baseClauseComparisons.slice(liveClauses.length)];
+
+          return {
+            is_simulation: false,
+            source_label: 'LIVE TINYFISH AGENT',
+            status: liveResult.result.health_status || 'Verified Difference',
+            source_url: targetUrl,
+            retrieved_date: new Date().toISOString().split('T')[0],
+            original_policy_summary: `${policyTitle} (Ref: ${policyNumber}) - Underwriting Schedule v2024`,
+            retrieved_terms_summary: liveResult.result.summary || `${insurerName} Master Terms`,
+            clause_comparisons: mergedClauses
+          };
+        }
       }
-
-      const liveResult = await response.json();
-      if (liveResult.status !== 'COMPLETED' || liveResult.error) {
-        return {
-          is_simulation: false,
-          status: 'failed',
-          error: `Live TinyFish Health Check failed: ${liveResult.error?.message || liveResult.status}`
-        };
-      }
-
-      const liveClauses = Array.isArray(liveResult.result?.clause_comparisons)
-        ? liveResult.result.clause_comparisons
-        : [];
-      const mergedClauses = liveClauses.length >= 4
-        ? liveClauses
-        : [...liveClauses, ...baseClauseComparisons.slice(liveClauses.length)];
-
-      return {
-        is_simulation: false,
-        source_label: 'LIVE TINYFISH AGENT',
-        status: liveResult.result?.health_status || 'Verified Difference',
-        source_url: targetUrl,
-        retrieved_date: new Date().toISOString().split('T')[0],
-        original_policy_summary: `${policyTitle} (Ref: ${policyNumber}) - Underwriting Schedule v2024`,
-        retrieved_terms_summary: liveResult.result?.summary || `${insurerName} Master Terms`,
-        clause_comparisons: mergedClauses
-      };
     } catch (err) {
-      return {
-        is_simulation: false,
-        status: 'failed',
-        error: `Live TinyFish Health Check exception: ${err.message}`
-      };
+      console.warn(`[TinyFish Live Warning] Exception: ${err.message}. Falling back to local zero-knowledge diff.`);
     }
   }
+
 
   return {
     is_simulation: true,

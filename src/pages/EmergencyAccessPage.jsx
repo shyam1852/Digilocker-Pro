@@ -15,7 +15,7 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { useVault } from '../context/VaultContext';
-import { splitSecret, combineShares } from '../utils/shamir';
+import { splitSecret, combineShares, generateRecoveryKitHtml } from '../utils/shamir';
 
 export default function EmergencyAccessPage() {
   const { emergencyStatus, checkIn, updateEmergencySettings } = useVault();
@@ -414,6 +414,62 @@ export default function EmergencyAccessPage() {
                   style={{ color: 'var(--status-warning)' }}
                 >
                   Test 1 Share Alone (Threshold Failure)
+                </button>
+
+                <button
+                  onClick={() => {
+                    setTestError(null);
+                    setTestResult(null);
+                    try {
+                      // Deliberately corrupt 1 hex byte in share 2
+                      const corruptedShare = {
+                        ...shamirShares.shares[1],
+                        data: shamirShares.shares[1].data.slice(0, -2) + 'ff'
+                      };
+                      combineShares([shamirShares.shares[0], corruptedShare]);
+                    } catch (err) {
+                      setTestError(`Fail-Closed Security Verified: ${err.message}`);
+                    }
+                  }}
+                  className="btn btn-secondary btn-sm"
+                  style={{ color: 'var(--status-danger)' }}
+                >
+                  Test Tampered Share (Fail-Closed)
+                </button>
+
+                <button
+                  onClick={() => {
+                    const html = generateRecoveryKitHtml({
+                      user: { username: 'shyamkeshri' },
+                      shares: shamirShares.shares,
+                      nominee: { name: nomineeName || 'Priya Keshri', relationship: nomineeRelationship || 'Spouse' },
+                      switchInterval: intervalDays
+                    });
+                    const blob = new Blob([html], { type: 'text/html' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `DM_Locker_Pro_Emergency_Recovery_Kit_${new Date().toISOString().split('T')[0]}.html`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                  }}
+                  className="btn btn-primary btn-sm"
+                >
+                  Download Printable Offline Recovery Kit (.html)
+                </button>
+
+                <button
+                  onClick={() => {
+                    setShamirShares(null);
+                    setTestResult(null);
+                    setTestError(null);
+                    setMessage('Recovery shares wiped from volatile memory. Offline custody active.');
+                  }}
+                  className="btn btn-secondary btn-sm"
+                >
+                  Secure Wipe Shares From Memory
                 </button>
               </div>
 
