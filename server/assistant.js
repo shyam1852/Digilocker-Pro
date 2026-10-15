@@ -554,6 +554,80 @@ async function queryExternalLLM({ userMessage, systemPrompt, conversationHistory
 }
 
 /**
+ * Accurately extracts financial figures, durations, and ages from natural user messages
+ */
+function extractFinancialParameters(text) {
+  const t = (text || '').toLowerCase();
+
+  // 1. Monthly amount
+  let monthlyAmount = null;
+  const mMatch = t.match(/(?:rs\.?|inr|₹)?\s*(\d+(?:\.\d+)?)\s*(k|lakh|lac)?\s*(?:per|\/|a)?\s*(?:month|pm|mo)\b/i) ||
+                 t.match(/(?:invest|save|put|sip)\s*(?:rs\.?|inr|₹)?\s*(\d+(?:\.\d+)?)\s*(k|lakh|lac)?\b/i);
+  if (mMatch) {
+    let num = parseFloat(mMatch[1]);
+    const u = (mMatch[2] || '').toLowerCase();
+    if (u === 'k') num *= 1000;
+    else if (u === 'lakh' || u === 'lac') num *= 100000;
+    monthlyAmount = num;
+  }
+
+  // 2. Annual amount
+  let annualAmount = null;
+  const annMatch = t.match(/(?:rs\.?|inr|₹)?\s*(\d+(?:\.\d+)?)\s*(k|lakh|lac)?\s*(?:per|\/|a)?\s*(?:year|annum|yr|annually|pa)\b/i) ||
+                   t.match(/(?:premium|paying)\D*(\d+(?:\.\d+)?)\s*(k|lakh|lac)?/i);
+  if (annMatch) {
+    let num = parseFloat(annMatch[1]);
+    const u = (annMatch[2] || '').toLowerCase();
+    if (u === 'k') num *= 1000;
+    else if (u === 'lakh' || u === 'lac') num *= 100000;
+    annualAmount = num;
+  }
+
+  if (monthlyAmount && !annualAmount) annualAmount = monthlyAmount * 12;
+  else if (annualAmount && !monthlyAmount) monthlyAmount = Math.round(annualAmount / 12);
+
+  // 3. Age
+  let age = null;
+  const ageMatch = t.match(/(?:age\s*(?:is|:)?\s*|i am\s*)(\d{1,2})\b/i) ||
+                   t.match(/(\d{1,2})\s*(?:years?\s*old|yr\s*old)\b/i);
+  if (ageMatch) {
+    const a = parseInt(ageMatch[1], 10);
+    if (a >= 10 && a <= 90) age = a;
+  }
+
+  // 4. Horizon in years
+  let horizonYears = null;
+  const termMatch = t.match(/(?:for|term|horizon|duration|period|over)\s*(\d{1,2})\s*(?:years?|yrs?)\b/i);
+  if (termMatch) {
+    const y = parseInt(termMatch[1], 10);
+    if (y > 0 && y <= 50) horizonYears = y;
+  }
+
+  // 5. Sum Assured
+  let sumAssured = null;
+  const saMatch = t.match(/(?:sa|sum assured|cover|life cover)\D*(\d+(?:\.\d+)?)\s*(k|lakh|lac|cr|crore)?/i);
+  if (saMatch) {
+    let num = parseFloat(saMatch[1].replace(/,/g, ''));
+    const u = (saMatch[2] || '').toLowerCase();
+    if (u === 'k') num *= 1000;
+    else if (u === 'lakh' || u === 'lac') num *= 100000;
+    else if (u === 'cr' || u === 'crore') num *= 10000000;
+    sumAssured = num;
+  }
+
+  return { monthlyAmount, annualAmount, age, horizonYears, sumAssured };
+}
+
+/**
+ * Computes compound future value for monthly SIP / investment
+ */
+function calculateSipFutureValue(monthlyAmount, annualRatePercent, years) {
+  const i = (annualRatePercent / 100) / 12;
+  const n = years * 12;
+  return Math.round(monthlyAmount * ((Math.pow(1 + i, n) - 1) / i) * (1 + i));
+}
+
+/**
  * Handles conversational inquiries in DM Assistant with comprehensive NLP intent analysis,
  * dynamic live vault querying, and official regulatory citations.
  */
@@ -565,6 +639,7 @@ export async function processAssistantMessage({
   selectedDocumentIds = []
 }) {
   const now = new Date().toISOString();
+  const fp = extractFinancialParameters(userMessage);
 
   // Retrieve user's full document catalog for context-aware responses
   const allUserDocs = db.prepare(`
@@ -999,24 +1074,83 @@ Guidelines:
     }
 
     // --------------------------------------------------------------------------
-    // 12. LIC MATURITY CALCULATOR & PLAN EVALUATION
+    // 12. TAILORED INVESTMENT PLANNING & MONTHLY COMPOUNDING ANALYSIS
+    // (Handles queries like "5k per month invest idea in lic" or "age 20 invest 500 per month for 20 years")
     // --------------------------------------------------------------------------
     else if (
-      mode === 'lic-calculator' ||
-      msgLower.includes('lic') ||
-      msgLower.includes('maturity') ||
-      msgLower.includes('jeevan') ||
+      msgLower.includes('invest idea') ||
+      msgLower.includes('want to invest') ||
+      msgLower.includes('how to invest') ||
+      msgLower.includes('where to invest') ||
+      msgLower.includes('per month') ||
+      msgLower.includes('/month') ||
+      msgLower.includes('pm') ||
+      msgLower.includes('sip') ||
+      ((msgLower.includes('invest') || mode === 'personal-finance') && (fp.monthlyAmount || fp.age || fp.horizonYears)) ||
+      (mode === 'lic-calculator' && (fp.monthlyAmount || fp.age) && !msgLower.includes('table'))
+    ) {
+      const monthly = fp.monthlyAmount || 5000;
+      const years = fp.horizonYears || 20;
+      const age = fp.age;
+      const isLic = msgLower.includes('lic') || mode === 'lic-calculator';
+
+      const totalInvested = monthly * 12 * years;
+      const mfCorpus = calculateSipFutureValue(monthly, 12.0, years);
+      const ppfCorpus = calculateSipFutureValue(monthly, 7.1, years);
+      const licCorpus = calculateSipFutureValue(monthly, 5.0, years);
+
+      metadata.sources.push(OFFICIAL_SOURCES.SEBI_INVESTOR);
+      metadata.sources.push(OFFICIAL_SOURCES.RBI_KEHTA_HAI);
+      if (isLic) metadata.sources.push(OFFICIAL_SOURCES.LIC_POLICY_CONDITIONS);
+
+      assistantResponse = `### 💡 Personalized Investment & Wealth Building Analysis\n\n` +
+        `**Your Inputs:** ` + (age ? `Age: **${age} Years** | ` : '') + `Monthly Investment: **₹${monthly.toLocaleString('en-IN')}/month** (₹${(monthly * 12).toLocaleString('en-IN')}/yr) | Horizon: **${years} Years**\n\n` +
+        `#### 📊 ${years}-Year Growth Comparison Matrix:\n\n` +
+        `| Investment Vehicle | Expected Annual Return | Total Deposited | Estimated Maturity Corpus | Wealth Gained |\n` +
+        `|---|---|---|---|---|\n` +
+        `| **Nifty 50 / Flexi-Cap Index SIP** | **12.0% CAGR** | ₹${totalInvested.toLocaleString('en-IN')} | **₹${mfCorpus.toLocaleString('en-IN')}** | **+₹${(mfCorpus - totalInvested).toLocaleString('en-IN')}** |\n` +
+        `| **Public Provident Fund (PPF)** | **7.1% Sovereign** | ₹${totalInvested.toLocaleString('en-IN')} | **₹${ppfCorpus.toLocaleString('en-IN')}** | **+₹${(ppfCorpus - totalInvested).toLocaleString('en-IN')}** |\n` +
+        `| **Traditional LIC Endowment (e.g. 914/936)** | **~4.8% - 5.2% IRR** | ₹${totalInvested.toLocaleString('en-IN')} | **₹${licCorpus.toLocaleString('en-IN')}** | **+₹${(licCorpus - totalInvested).toLocaleString('en-IN')}** |\n\n`;
+
+      if (isLic) {
+        assistantResponse += `#### 🔍 Is Investing ₹${monthly.toLocaleString('en-IN')}/month in LIC a Good Idea?\n` +
+          `While LIC offers unmatched sovereign trust and brand reliability, traditional endowment/money-back plans are **not designed for optimal wealth creation**:\n` +
+          `- **Low Net Returns (~5% IRR):** High mortality charges, administrative costs, and agent commissions in traditional plans severely limit compounding.\n` +
+          `- **The Opportunity Cost:** Over ${years} years, investing ₹${monthly.toLocaleString('en-IN')}/month in an Index Mutual Fund creates **₹${mfCorpus.toLocaleString('en-IN')}** — generating **₹${(mfCorpus - licCorpus).toLocaleString('en-IN')} more wealth** than an LIC endowment policy!\n` +
+          `- **Smarter Alternative:** If you need life insurance, buy a **Pure Term Policy** (such as LIC Tech Term Plan 854) which secures your family with ₹50 Lakhs to ₹1 Crore cover at a minimal cost (~₹500-₹1,000/mo), and invest the remainder in a compounding Equity Index SIP or PPF.\n\n`;
+      }
+
+      if (age && age <= 25) {
+        assistantResponse += `#### 🚀 Special Compounding Advantage for Age ${age}:\n` +
+          `- Starting at age ${age} gives you the single greatest superpower in investing: **TIME**.\n` +
+          `- Putting away just **₹${monthly.toLocaleString('en-IN')}/month** starting at age ${age} accumulates to **₹${mfCorpus.toLocaleString('en-IN')}** by age ${age + years}!\n` +
+          `- **Actionable 80/20 Plan for Age ${age}:**\n` +
+          `  1. **80% (₹${Math.round(monthly * 0.8).toLocaleString('en-IN')}/mo)** -> Broad Market Index Mutual Fund (Nifty 50 / Large & Midcap) for exponential compounding.\n` +
+          `  2. **20% (₹${Math.round(monthly * 0.2).toLocaleString('en-IN')}/mo)** -> PPF for 100% tax-free, sovereign risk-free capital stability.\n\n`;
+      }
+
+      assistantResponse += `> 📘 **SEBI Investor Rule:** Never combine insurance protection with wealth investment. Verify licensed mutual funds and SEBI registered intermediaries at [SEBI Investor Portal](${OFFICIAL_SOURCES.SEBI_INVESTOR.url}).`;
+    }
+
+    // --------------------------------------------------------------------------
+    // 13. DIRECT LIC POLICY MATURITY CALCULATOR
+    // (Handles specific policy table calculations e.g. Table 914, Table 936, Jeevan Labh, Sum Assured)
+    // --------------------------------------------------------------------------
+    else if (
       msgLower.includes('table 914') ||
       msgLower.includes('table 936') ||
-      msgLower.includes('table 945')
+      msgLower.includes('table 945') ||
+      msgLower.includes('table 933') ||
+      msgLower.includes('jeevan labh') ||
+      msgLower.includes('jeevan umang') ||
+      msgLower.includes('jeevan anand') ||
+      msgLower.includes('maturity calculator') ||
+      msgLower.includes('bonus rate') ||
+      (mode === 'lic-calculator' && !msgLower.includes('invest') && !msgLower.includes('idea'))
     ) {
-      const saMatch = userMessage.match(/(?:sa|sum assured|cover)\D*(\d[\d,]+)/i);
-      const termMatch = userMessage.match(/(?:term|years)\D*(\d{1,2})/i);
-      const premiumMatch = userMessage.match(/(?:premium|paying)\D*(\d[\d,]+)/i);
-
-      const sa = saMatch ? parseInt(saMatch[1].replace(/,/g, ''), 10) : 500000;
-      const term = termMatch ? parseInt(termMatch[1], 10) : 21;
-      const premium = premiumMatch ? parseInt(premiumMatch[1].replace(/,/g, ''), 10) : 24000;
+      const sa = fp.sumAssured || 500000;
+      const term = fp.horizonYears || 21;
+      const premium = fp.annualAmount || (fp.monthlyAmount ? fp.monthlyAmount * 12 : 24000);
 
       const calcResult = computeLicMaturity({
         planNumber: msgLower.includes('914') ? '914' : (msgLower.includes('945') ? '945' : '936'),
@@ -1047,7 +1181,7 @@ Guidelines:
     }
 
     // --------------------------------------------------------------------------
-    // 13. PERSONAL FINANCE, INVESTMENTS & TAX
+    // 14. GENERAL PERSONAL FINANCE & ASSET ALLOCATION
     // --------------------------------------------------------------------------
     else if (
       mode === 'personal-finance' ||
@@ -1061,8 +1195,8 @@ Guidelines:
     ) {
       const comp = generateInvestmentComparison({
         goal: msgLower.includes('retire') ? 'Retirement Planning' : (msgLower.includes('child') ? 'Child Education' : 'Long-Term Wealth Creation'),
-        horizonYears: msgLower.includes('10') ? 10 : (msgLower.includes('15') ? 15 : 5),
-        monthlyBudget: 5000,
+        horizonYears: fp.horizonYears || (msgLower.includes('10') ? 10 : (msgLower.includes('15') ? 15 : 5)),
+        monthlyBudget: fp.monthlyAmount || 5000,
         riskTolerance: msgLower.includes('safe') ? 'Conservative' : 'Moderate'
       });
 
