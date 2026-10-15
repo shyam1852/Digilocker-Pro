@@ -196,14 +196,32 @@ export default function DocumentDetailModal({ document, isOpen, onClose }) {
           padding: '0.85rem',
           marginBottom: '1.25rem'
         }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '0.5rem' }}>
-            <Lock size={13} style={{ color: 'var(--accent)' }} />
-            <span>Cryptographic Envelope</span>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '0.5rem' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-primary)' }}>
+              <Lock size={13} style={{ color: 'var(--accent)' }} />
+              <span>Cryptographic Envelope & Integrity Baseline</span>
+            </div>
+            <span style={{
+              fontSize: '0.7rem',
+              fontWeight: 600,
+              padding: '0.15rem 0.45rem',
+              borderRadius: 'var(--radius-sm)',
+              background: document.integrity_status === 'TAMPERING_DETECTED' ? 'var(--status-danger-bg)' : 'var(--status-success-bg)',
+              color: document.integrity_status === 'TAMPERING_DETECTED' ? 'var(--status-danger)' : 'var(--status-success)'
+            }}>
+              {document.integrity_status || 'VERIFIED'}
+            </span>
           </div>
 
           <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
             <div>
-              <span style={{ color: 'var(--text-muted)' }}>Algorithm:</span> AES-256-GCM (Authenticated 128-bit Tag)
+              <span style={{ color: 'var(--text-muted)' }}>Algorithm:</span> AES-256-GCM (Zero-Knowledge, 128-bit Tag)
+            </div>
+            <div>
+              <span style={{ color: 'var(--text-muted)' }}>SHA-256 Content Digest:</span>{' '}
+              <code style={{ fontFamily: 'var(--font-mono)', fontSize: '0.68rem', color: 'var(--text-primary)' }}>
+                {document.content_digest || 'SHA-256 baseline registered in manifest'}
+              </code>
             </div>
             <div>
               <span style={{ color: 'var(--text-muted)' }}>Initialization Vector (IV):</span>{' '}
@@ -241,7 +259,7 @@ export default function DocumentDetailModal({ document, isOpen, onClose }) {
         )}
 
         {/* Modal Action Controls */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '0.5rem', borderTop: '1px solid var(--border-subtle)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingTop: '0.5rem', borderTop: '1px solid var(--border-subtle)', flexWrap: 'wrap', gap: '0.5rem' }}>
           {confirmDelete ? (
             <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
               <span style={{ fontSize: '0.75rem', color: 'var(--status-danger)' }}>Confirm permanent deletion?</span>

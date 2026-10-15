@@ -1,33 +1,50 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   LayoutDashboard,
   Shield,
   FolderLock,
+  ShieldCheck,
+  History,
+  RotateCcw,
+  Flame,
+  ShieldAlert,
+  FileBarChart,
+  Settings,
+  HelpCircle,
   HeartPulse,
   Landmark,
   GraduationCap,
   Sparkles,
   RefreshCw,
-  ShieldAlert,
-  Settings,
   LogOut,
   X,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  ChevronDown
 } from 'lucide-react';
 import ThemeSwitcher from './ThemeSwitcher';
 import { useAuth } from '../context/AuthContext';
 
-export const NAV_ITEMS = [
+export const PHOENIX_NAV_ITEMS = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
-  { id: 'vault', label: 'My Vault', icon: FolderLock },
-  { id: 'healthcare', label: 'Healthcare', icon: HeartPulse },
-  { id: 'finance', label: 'Finance & Insurance', icon: Landmark },
+  { id: 'vault', label: 'My Documents', icon: FolderLock },
+  { id: 'integrity', label: 'Integrity Verification', icon: ShieldCheck, badge: 'SHA-256' },
+  { id: 'versions', label: 'Version History', icon: History },
+  { id: 'recovery', label: 'Recovery Center', icon: RotateCcw },
+  { id: 'rehearsal', label: 'Breach Rehearsal', icon: Flame, badge: 'PROVE' },
+  { id: 'events', label: 'Security Events', icon: ShieldAlert },
+  { id: 'reports', label: 'Reports', icon: FileBarChart },
+  { id: 'settings', label: 'Settings', icon: Settings },
+  { id: 'help', label: 'Help & Security Info', icon: HelpCircle }
+];
+
+export const WORKSPACE_ITEMS = [
+  { id: 'healthcare', label: 'Healthcare Hub', icon: HeartPulse },
+  { id: 'finance', label: 'Finance & LIC Hub', icon: Landmark },
   { id: 'career', label: 'Career & Education', icon: GraduationCap },
   { id: 'assistant', label: 'DM Assistant', icon: Sparkles, badge: 'AI' },
   { id: 'renewals', label: 'Renewals & Alerts', icon: RefreshCw },
-  { id: 'privacy', label: 'Privacy & Emergency', icon: ShieldAlert },
-  { id: 'settings', label: 'Settings', icon: Settings },
+  { id: 'privacy', label: 'Emergency & Shamir', icon: Shield }
 ];
 
 export default function Sidebar({
@@ -39,6 +56,7 @@ export default function Sidebar({
   onToggleCollapse
 }) {
   const { user, logout } = useAuth();
+  const [showWorkspaces, setShowWorkspaces] = useState(false);
 
   const handleNavClick = (id) => {
     onSelectTab(id);
@@ -49,13 +67,13 @@ export default function Sidebar({
     <aside className={`app-sidebar ${isOpen ? 'open' : ''} ${isCollapsed ? 'collapsed' : ''}`}>
       {/* Brand Header */}
       <div className="sidebar-header" style={{ position: 'relative' }}>
-        <div className="brand-mark" title="DM Locker Pro - AES-256-GCM Secure">
+        <div className="brand-mark" style={{ background: 'linear-gradient(135deg, #ef4444 0%, #aa3bff 100%)' }} title="PHOENIX - Self-Defending Document Vault">
           <Shield size={18} strokeWidth={2.4} />
         </div>
         {!isCollapsed && (
           <>
-            <div className="brand-text">DM Locker Pro</div>
-            <span className="brand-badge">SECURE</span>
+            <div className="brand-text">PHOENIX</div>
+            <span className="brand-badge" style={{ background: 'rgba(239, 68, 68, 0.2)', color: 'var(--status-danger)' }}>VAULT</span>
           </>
         )}
 
@@ -94,9 +112,9 @@ export default function Sidebar({
         )}
       </div>
 
-      {/* Main Navigation */}
+      {/* Main PHOENIX Navigation */}
       <nav className="sidebar-nav">
-        {NAV_ITEMS.map((item) => {
+        {PHOENIX_NAV_ITEMS.map((item) => {
           const Icon = item.icon;
           const isActive = activeTab === item.id;
           return (
@@ -117,9 +135,9 @@ export default function Sidebar({
                     padding: '0.1rem 0.35rem',
                     borderRadius: '4px',
                     fontWeight: 700,
-                    backgroundColor: 'rgba(59, 130, 246, 0.15)',
-                    color: '#60a5fa',
-                    border: '1px solid rgba(59, 130, 246, 0.3)'
+                    backgroundColor: item.badge === 'PROVE' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(59, 130, 246, 0.15)',
+                    color: item.badge === 'PROVE' ? 'var(--status-danger)' : '#60a5fa',
+                    border: item.badge === 'PROVE' ? '1px solid rgba(239, 68, 68, 0.3)' : '1px solid rgba(59, 130, 246, 0.3)'
                   }}
                 >
                   {item.badge}
@@ -128,6 +146,54 @@ export default function Sidebar({
             </button>
           );
         })}
+
+        {/* Collapsible Specialized Workspaces Section */}
+        {!isCollapsed && (
+          <div style={{ marginTop: '0.75rem', paddingTop: '0.75rem', borderTop: '1px solid var(--border-subtle)' }}>
+            <button
+              type="button"
+              onClick={() => setShowWorkspaces(s => !s)}
+              style={{
+                width: '100%',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '0.4rem 0.65rem',
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--text-muted)',
+                fontSize: '0.7rem',
+                textTransform: 'uppercase',
+                letterSpacing: '0.04em',
+                fontWeight: 600,
+                cursor: 'pointer'
+              }}
+            >
+              <span>Specialized Workspaces</span>
+              <ChevronDown size={13} style={{ transform: showWorkspaces ? 'rotate(180deg)' : 'none', transition: 'transform 0.15s ease' }} />
+            </button>
+
+            {showWorkspaces && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.2rem', marginTop: '0.35rem' }}>
+                {WORKSPACE_ITEMS.map(item => {
+                  const Icon = item.icon;
+                  const isActive = activeTab === item.id;
+                  return (
+                    <button
+                      key={item.id}
+                      onClick={() => handleNavClick(item.id)}
+                      className={`nav-link ${isActive ? 'active' : ''}`}
+                      style={{ fontSize: '0.8rem', padding: '0.45rem 0.65rem' }}
+                    >
+                      <Icon size={15} />
+                      <span>{item.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </nav>
 
       {/* Permanent Bottom Theme Switcher & User Profile Footer */}

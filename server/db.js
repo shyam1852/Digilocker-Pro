@@ -253,6 +253,123 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_org_history_user ON organization_history (user_id);
+
+  /* ==========================================================================
+     PHOENIX CORE SECURITY & VAULT RECOVERY TABLES
+     ========================================================================== */
+
+  CREATE TABLE IF NOT EXISTS document_versions (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    version_number INTEGER NOT NULL,
+    storage_object_key TEXT,
+    manifest_id TEXT,
+    content_digest TEXT NOT NULL,
+    encrypted_blob TEXT NOT NULL,
+    encryption_iv TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    file_type TEXT NOT NULL,
+    file_size_bytes INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    recovery_eligible INTEGER DEFAULT 1,
+    status TEXT DEFAULT 'active',
+    FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_doc_versions_doc ON document_versions(document_id);
+  CREATE INDEX IF NOT EXISTS idx_doc_versions_ver ON document_versions(document_id, version_number);
+
+  CREATE TABLE IF NOT EXISTS integrity_manifests (
+    id TEXT PRIMARY KEY,
+    document_version_id TEXT,
+    algorithm TEXT NOT NULL DEFAULT 'SHA-256',
+    manifest_payload TEXT NOT NULL,
+    authentication_method TEXT NOT NULL DEFAULT 'HMAC-SHA256',
+    signature_or_mac TEXT NOT NULL,
+    key_reference TEXT NOT NULL DEFAULT 'phoenix-auth-authority-v1',
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (document_version_id) REFERENCES document_versions(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_manifests_version ON integrity_manifests(document_version_id);
+
+  CREATE TABLE IF NOT EXISTS rehearsal_runs (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    scenario TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    result_summary TEXT,
+    report_json TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_rehearsal_runs_owner ON rehearsal_runs(owner_id);
+
+  CREATE TABLE IF NOT EXISTS rehearsal_assets (
+    id TEXT PRIMARY KEY,
+    rehearsal_run_id TEXT NOT NULL,
+    fixture_type TEXT NOT NULL,
+    fixture_reference TEXT NOT NULL,
+    initial_digest TEXT NOT NULL,
+    final_digest TEXT,
+    status TEXT NOT NULL,
+    FOREIGN KEY (rehearsal_run_id) REFERENCES rehearsal_runs(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_rehearsal_assets_run ON rehearsal_assets(rehearsal_run_id);
+
+  CREATE TABLE IF NOT EXISTS security_events (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT,
+    rehearsal_run_id TEXT,
+    document_id TEXT,
+    event_type TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    details TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE SET NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_security_events_owner ON security_events(owner_id);
+  CREATE INDEX IF NOT EXISTS idx_security_events_sev ON security_events(severity);
+  CREATE INDEX IF NOT EXISTS idx_security_events_type ON security_events(event_type);
+
+  CREATE TABLE IF NOT EXISTS recovery_jobs (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    rehearsal_run_id TEXT,
+    document_id TEXT NOT NULL,
+    source_version_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    verification_result TEXT,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    error_code TEXT,
+    FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_recovery_jobs_owner ON recovery_jobs(owner_id);
+  CREATE INDEX IF NOT EXISTS idx_recovery_jobs_doc ON recovery_jobs(document_id);
+
+  CREATE TABLE IF NOT EXISTS key_metadata (
+    id TEXT PRIMARY KEY,
+    owner_id TEXT NOT NULL,
+    key_reference TEXT NOT NULL,
+    algorithm TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    rotated_at TEXT,
+    FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_key_metadata_owner ON key_metadata(owner_id);
 `);
 
 // Safe non-destructive column migrations
@@ -270,7 +387,14 @@ safeAddColumn('documents', 'reminders_enabled', 'INTEGER DEFAULT 1');
 safeAddColumn('documents', 'folder_id', 'TEXT');
 safeAddColumn('documents', 'tags', "TEXT DEFAULT '[]'");
 safeAddColumn('documents', 'file_hash', 'TEXT');
+safeAddColumn('documents', 'current_version_id', 'TEXT');
+safeAddColumn('documents', 'encryption_algorithm', "TEXT DEFAULT 'AES-256-GCM'");
+safeAddColumn('documents', 'integrity_status', "TEXT DEFAULT 'VERIFIED'");
+safeAddColumn('documents', 'manifest_id', 'TEXT');
+safeAddColumn('documents', 'content_digest', 'TEXT');
+safeAddColumn('documents', 'storage_object_key', 'TEXT');
 
+safeAddColumn('users', 'display_name', 'TEXT');
 safeAddColumn('users', 'reminder_email_enabled', 'INTEGER DEFAULT 1');
 safeAddColumn('users', 'reminder_intervals', "TEXT DEFAULT '[30, 7, 1]'");
 safeAddColumn('users', 'reminder_post_expiry', 'INTEGER DEFAULT 0');
@@ -314,6 +438,67 @@ export function ensureUserDefaultFolders(userId) {
       }
     });
     insertMany(DEFAULT_SYSTEM_FOLDERS);
+  }
+}
+
+/**
+ * Log a structured security event to persistent audit ledger
+ */
+export function logSecurityEvent({
+  ownerId = null,
+  eventType,
+  severity = 'INFO', // INFO, LOW, MEDIUM, HIGH, CRITICAL
+  outcome = 'SUCCESS', // SUCCESS, DENIED, TAMPERING_DETECTED, RECOVERED, FAILED
+  details = {},
+  rehearsalRunId = null,
+  documentId = null
+}) {
+  try {
+    const id = `sec_${Math.random().toString(36).substring(2, 12)}`;
+    const now = new Date().toISOString();
+    const detailsStr = typeof details === 'string' ? details : JSON.stringify(details);
+
+    db.prepare(`
+      INSERT INTO security_events (
+        id, owner_id, rehearsal_run_id, document_id,
+        event_type, severity, outcome, details, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      ownerId,
+      rehearsalRunId,
+      documentId,
+      eventType,
+      severity,
+      outcome,
+      detailsStr,
+      now
+    );
+
+    // Also mirror to activity_logs for backward compatibility
+    if (ownerId) {
+      try {
+        db.prepare(`
+          INSERT INTO activity_logs (id, user_id, event_type, description, is_simulation, ip_address, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          `act_${Math.random().toString(36).substring(2, 10)}`,
+          ownerId,
+          eventType,
+          typeof details === 'object' && details.message ? details.message : `${eventType}: ${outcome}`,
+          rehearsalRunId ? 1 : 0,
+          '127.0.0.1',
+          now
+        );
+      } catch {
+        // ignore activity_log mirror errors
+      }
+    }
+
+    return id;
+  } catch (err) {
+    console.error('Failed to log security event:', err.message);
+    return null;
   }
 }
 
