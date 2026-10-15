@@ -7,68 +7,26 @@ import FloatingAssistant from './components/FloatingAssistant';
 
 // Pages
 import AuthPage from './pages/AuthPage';
-import LandingPage from './pages/LandingPage';
 import OverviewPage from './pages/OverviewPage';
 import DocumentVaultPage from './pages/DocumentVaultPage';
-import IntegrityVerificationPage from './pages/IntegrityVerificationPage';
-import VersionHistoryPage from './pages/VersionHistoryPage';
-import RecoveryCenterPage from './pages/RecoveryCenterPage';
-import BreachRehearsalPage from './pages/BreachRehearsalPage';
-import SecurityEventsPage from './pages/SecurityEventsPage';
-import ReportsPage from './pages/ReportsPage';
-import SettingsPage from './pages/SettingsPage';
-import HelpSecurityPage from './pages/HelpSecurityPage';
-
-// Specialized Workspaces
 import HealthcarePage from './pages/HealthcarePage';
 import FinanceInsurancePage from './pages/FinanceInsurancePage';
 import CareerEducationPage from './pages/CareerEducationPage';
 import DMAssistantPage from './pages/DMAssistantPage';
 import RenewalCenterPage from './pages/RenewalCenterPage';
 import PrivacyEmergencyPage from './pages/PrivacyEmergencyPage';
+import SettingsPage from './pages/SettingsPage';
 import VerifierPage from './pages/VerifierPage';
 import { Shield } from 'lucide-react';
 
 const PAGE_META = {
   overview: {
-    title: 'Operational Security Overview',
-    desc: 'High-level dashboard of cryptographic assets, verification health, and breach defense metrics'
+    title: 'Operational Overview',
+    desc: 'High-level dashboard of encrypted assets, upcoming reminders, and deadlines'
   },
   vault: {
-    title: 'My Documents Vault',
+    title: 'My Vault',
     desc: 'Client-side AES-256-GCM zero-knowledge encrypted repository with smart folders'
-  },
-  integrity: {
-    title: 'Integrity Verification Enclave',
-    desc: 'Tamper-evident verification workstation with canonical RFC 8785 manifests & HMAC-SHA256 signing'
-  },
-  versions: {
-    title: 'Document Version History',
-    desc: 'Persistent immutable-by-design version lineage with digest tracking and restoration eligibility'
-  },
-  recovery: {
-    title: 'Vault Recovery Center',
-    desc: 'Controlled rollback and recovery proof workflows with cryptographic pre-check verification'
-  },
-  rehearsal: {
-    title: 'Breach Rehearsal & Recovery Proof',
-    desc: 'Controlled breach exercises, automated incident containment, and cryptographic recovery proof'
-  },
-  events: {
-    title: 'Security Audit Events Ledger',
-    desc: 'Persistent audit ledger tracking uploads, verifications, containment actions, and access control'
-  },
-  reports: {
-    title: 'Security & Rehearsal Reports',
-    desc: 'Official cryptographic attestation certificates with execution telemetry and JSON export'
-  },
-  settings: {
-    title: 'Settings & Custodian Identity',
-    desc: 'Manage profile preferences, theme modes, cryptographic keys inventory, and account security'
-  },
-  help: {
-    title: 'Help & Security Information',
-    desc: 'Comprehensive trust model documentation, encryption guidance, and operational limitations'
   },
   healthcare: {
     title: 'Healthcare Workspace',
@@ -88,11 +46,15 @@ const PAGE_META = {
   },
   renewals: {
     title: 'Renewals & Expiry Alerts',
-    desc: 'Smart scheduled email reminders & autonomous rate quotation workflows'
+    desc: 'Smart 30d/7d/1d scheduled email reminders & autonomous TinyFish rate quotation workflows'
   },
   privacy: {
     title: 'Privacy & Emergency Access Hub',
     desc: 'Inactivity heartbeats, 2-of-3 Shamir recovery, nominee claims & one-time QR disclosure'
+  },
+  settings: {
+    title: 'Settings & Security',
+    desc: 'Manage profile, theme preferences, notification channels & security audit ledger'
   }
 };
 
@@ -104,8 +66,6 @@ export default function App() {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
-  const [showAuthModal, setShowAuthModal] = useState(false);
-  const [authIsSignup, setAuthIsSignup] = useState(false);
 
   if (loading) {
     return (
@@ -118,39 +78,24 @@ export default function App() {
         backgroundColor: 'var(--bg-app)',
         gap: '1rem'
       }}>
-        <div className="brand-mark" style={{ width: '48px', height: '48px', background: 'linear-gradient(135deg, #ef4444 0%, #aa3bff 100%)' }}>
-          <Shield size={24} strokeWidth={2.4} color="#ffffff" />
+        <div className="brand-mark" style={{ width: '48px', height: '48px' }}>
+          <Shield size={24} strokeWidth={2.4} />
         </div>
         <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-          INITIALIZING PHOENIX CRYPTOGRAPHIC ENCLAVE...
+          INITIALIZING ZERO-KNOWLEDGE ENCLAVE...
         </div>
       </div>
     );
   }
 
-  // Public verifier screen
+  // Public verifier screen can be opened by anyone without login (for judge 2-window testing)
   if (typeof window !== 'undefined' && (window.location.pathname.startsWith('/verify') || window.location.search.includes('token='))) {
     return <VerifierPage />;
   }
 
-  // Unauthenticated Screen: Landing Page with Auth Action
+  // Unauthenticated Screen
   if (!user) {
-    if (showAuthModal) {
-      return (
-        <AuthPage
-          initialIsSignup={authIsSignup}
-          onBackToLanding={() => setShowAuthModal(false)}
-        />
-      );
-    }
-    return (
-      <LandingPage
-        onGoToAuth={(isSignup) => {
-          setAuthIsSignup(Boolean(isSignup));
-          setShowAuthModal(true);
-        }}
-      />
-    );
+    return <AuthPage />;
   }
 
   const currentMeta = PAGE_META[activeTab] || PAGE_META.overview;
@@ -175,22 +120,6 @@ export default function App() {
             onOpenUpload={() => setIsUploadModalOpen(true)}
           />
         );
-      case 'integrity':
-        return <IntegrityVerificationPage />;
-      case 'versions':
-        return <VersionHistoryPage />;
-      case 'recovery':
-        return <RecoveryCenterPage />;
-      case 'rehearsal':
-        return <BreachRehearsalPage />;
-      case 'events':
-        return <SecurityEventsPage />;
-      case 'reports':
-        return <ReportsPage />;
-      case 'settings':
-        return <SettingsPage />;
-      case 'help':
-        return <HelpSecurityPage />;
       case 'healthcare':
         return (
           <HealthcarePage
@@ -229,6 +158,8 @@ export default function App() {
             onOpenUpload={() => setIsUploadModalOpen(true)}
           />
         );
+      case 'settings':
+        return <SettingsPage />;
       default:
         return (
           <OverviewPage
