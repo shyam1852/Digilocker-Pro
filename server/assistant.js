@@ -462,7 +462,100 @@ export function generateInvestmentComparison(params = {}) {
 }
 
 /**
- * Handles conversational inquiries in DM Assistant
+ * Optional External LLM Bridge (OpenAI / Gemini / Groq)
+ * Seamlessly enhances conversational intelligence if an API key is configured in .env.
+ */
+async function queryExternalLLM({ userMessage, systemPrompt, conversationHistory = [] }) {
+  const groqKey = process.env.GROQ_API_KEY;
+  const openaiKey = process.env.OPENAI_API_KEY;
+  const geminiKey = process.env.GEMINI_API_KEY;
+
+  if (groqKey) {
+    try {
+      const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${groqKey}`
+        },
+        body: JSON.stringify({
+          model: 'llama-3.1-8b-instant',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            ...conversationHistory.slice(-4),
+            { role: 'user', content: userMessage }
+          ],
+          temperature: 0.3,
+          max_tokens: 1024
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const text = data.choices?.[0]?.message?.content;
+        if (text && text.trim()) return text.trim();
+      }
+    } catch (e) {
+      console.warn('[LLM Groq] Query error, falling back to local engine:', e.message);
+    }
+  }
+
+  if (openaiKey) {
+    try {
+      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${openaiKey}`
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: [
+            { role: 'system', content: systemPrompt },
+            ...conversationHistory.slice(-4),
+            { role: 'user', content: userMessage }
+          ],
+          temperature: 0.3,
+          max_tokens: 1024
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const text = data.choices?.[0]?.message?.content;
+        if (text && text.trim()) return text.trim();
+      }
+    } catch (e) {
+      console.warn('[LLM OpenAI] Query error, falling back to local engine:', e.message);
+    }
+  }
+
+  if (geminiKey) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [
+            { role: 'user', parts: [{ text: `${systemPrompt}\n\nUser Question: ${userMessage}` }] }
+          ]
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text && text.trim()) return text.trim();
+      }
+    } catch (e) {
+      console.warn('[LLM Gemini] Query error, falling back to local engine:', e.message);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Handles conversational inquiries in DM Assistant with comprehensive NLP intent analysis,
+ * dynamic live vault querying, and official regulatory citations.
  */
 export async function processAssistantMessage({
   userId,
@@ -473,26 +566,41 @@ export async function processAssistantMessage({
 }) {
   const now = new Date().toISOString();
 
-  // Retrieve user's selected documents if authorized
+  // Retrieve user's full document catalog for context-aware responses
+  const allUserDocs = db.prepare(`
+    SELECT id, title, category, policy_number, insurer_name, expiry_date, status, file_name, file_size_bytes, created_at
+    FROM documents
+    WHERE user_id = ?
+    ORDER BY created_at DESC
+  `).all(userId);
+
+  // Filter authorized documents if explicitly selected
   let authorizedDocs = [];
   if (selectedDocumentIds && selectedDocumentIds.length > 0) {
-    const placeholders = selectedDocumentIds.map(() => '?').join(',');
-    authorizedDocs = db.prepare(`
-      SELECT id, title, category, policy_number, insurer_name, expiry_date, status, file_name, file_size_bytes
-      FROM documents
-      WHERE user_id = ? AND id IN (${placeholders})
-    `).all(userId, ...selectedDocumentIds);
+    authorizedDocs = allUserDocs.filter(d => selectedDocumentIds.includes(d.id));
   } else {
-    // Basic high-level document headers for context (no decrypted contents)
-    authorizedDocs = db.prepare(`
-      SELECT id, title, category, policy_number, insurer_name, expiry_date, status
-      FROM documents
-      WHERE user_id = ?
-      LIMIT 10
-    `).all(userId);
+    authorizedDocs = allUserDocs.slice(0, 10);
   }
 
-  const msgLower = (userMessage || '').toLowerCase();
+  // Load recent conversation history for context
+  let history = [];
+  try {
+    const rawHistory = db.prepare(`
+      SELECT sender, content FROM chat_messages 
+      WHERE conversation_id = ? 
+      ORDER BY created_at DESC LIMIT 6
+    `).all(conversationId);
+    history = rawHistory.reverse().map(h => ({
+      role: h.sender === 'user' ? 'user' : 'assistant',
+      content: h.content
+    }));
+  } catch {
+    // history fallback
+  }
+
+  const msg = (userMessage || '').trim();
+  const msgLower = msg.toLowerCase();
+
   let assistantResponse = '';
   let metadata = {
     mode,
@@ -502,139 +610,601 @@ export async function processAssistantMessage({
     attachedDocuments: authorizedDocs.map(d => ({ id: d.id, title: d.title }))
   };
 
-  // 1. LIC Calculator Mode
-  if (mode === 'lic-calculator' || msgLower.includes('lic') || msgLower.includes('maturity') || msgLower.includes('jeevan')) {
-    // Extract numbers if present
-    const saMatch = userMessage.match(/(?:sa|sum assured|cover)\D*(\d[\d,]+)/i);
-    const termMatch = userMessage.match(/(?:term|years)\D*(\d{1,2})/i);
-    const premiumMatch = userMessage.match(/(?:premium|paying)\D*(\d[\d,]+)/i);
+  // Try external LLM first if configured
+  if (process.env.OPENAI_API_KEY || process.env.GEMINI_API_KEY || process.env.GROQ_API_KEY) {
+    const docSummary = allUserDocs.map(d => `- ${d.title} (Category: ${d.category || 'General'}, Status: ${d.status || 'active'}, Expiry: ${d.expiry_date || 'None'})`).join('\n');
+    const systemPrompt = `You are DM Assistant, an intelligent, zero-knowledge digital document vault and financial/insurance assistant for DM Locker Pro.
+You help users manage encrypted documents, understand policy clauses, calculate LIC returns, verify job document checklists, audit room-rent sub-limits, configure Dead Man's Switch, and use 2-of-3 Shamir's Secret Sharing.
+Current User's Vault Documents Summary:
+${docSummary || 'No documents uploaded yet.'}
 
-    const sa = saMatch ? parseInt(saMatch[1].replace(/,/g, ''), 10) : 500000;
-    const term = termMatch ? parseInt(termMatch[1], 10) : 21;
-    const premium = premiumMatch ? parseInt(premiumMatch[1].replace(/,/g, ''), 10) : 24000;
+Guidelines:
+- Maintain an encouraging, precise, and professional tone with clear GitHub-style markdown.
+- When explaining security, emphasize client-side AES-256-GCM authenticated encryption and PBKDF2 (100k rounds).
+- For insurance or investments, provide transparent math and official references (SEBI, RBI, IRDAI, LIC).
+- Never claim to offer formal legal or medical advice.`;
 
-    const calcResult = computeLicMaturity({
-      planNumber: '936',
-      planName: 'LIC Policy (Jeevan Labh / Endowment)',
-      sumAssured: sa,
-      policyTerm: term,
-      premiumPayingTerm: Math.min(term, 15),
-      annualPremium: premium
-    });
-
-    metadata.calculationSteps = calcResult.calculationSteps;
-    metadata.sources.push(OFFICIAL_SOURCES.LIC_POLICY_CONDITIONS);
-    metadata.sources.push(OFFICIAL_SOURCES.IRDAI_CONSUMER);
-
-    assistantResponse = `### 📊 Understand My LIC Policy & Maturity Analysis\n\n` +
-      `**Plan Identified / Evaluated:** ${calcResult.planDetails.planName}\n` +
-      `**Basis of Calculation:** ${calcResult.basis}\n\n` +
-      `#### Summary of Benefits:\n` +
-      `- **Guaranteed Sum Assured:** ₹${calcResult.benefitBreakdown.guaranteedSumAssured.toLocaleString('en-IN')}\n` +
-      `- **Estimated Simple Reversionary Bonus:** ₹${Math.round(calcResult.benefitBreakdown.simpleReversionaryBonus).toLocaleString('en-IN')} (at ₹${calcResult.benefitBreakdown.bonusRateUsedPer1000}/1000 SA/yr)\n` +
-      `- **Estimated Final Additional Bonus (FAB):** ₹${Math.round(calcResult.benefitBreakdown.finalAdditionalBonus).toLocaleString('en-IN')}\n` +
-      `- **Estimated Total Maturity Benefit:** **₹${Math.round(calcResult.benefitBreakdown.estimatedMaturityBenefit).toLocaleString('en-IN')}**\n\n` +
-      `#### Financial Return Evaluation:\n` +
-      `- **Total Premiums to be Paid:** ₹${calcResult.planDetails.totalPremiumsPaid?.toLocaleString('en-IN')}\n` +
-      `- **Net Gain over Investment:** ₹${Math.round(calcResult.benefitBreakdown.netGainOverPremiums)?.toLocaleString('en-IN')}\n` +
-      `- **Estimated Net Annualized Return (IRR):** **${calcResult.benefitBreakdown.annualizedNetYieldIRR}**\n\n` +
-      `> ℹ️ **Key Distinction:** Contractual guarantee covers the **Sum Assured**. Simple Reversionary Bonuses depend on LIC's annual operational surplus declared under Section 28 of the LIC Act.\n\n` +
-      `Official Terms Reference: [LIC Policy Conditions](${OFFICIAL_SOURCES.LIC_POLICY_CONDITIONS.url})`;
+    const llmReply = await queryExternalLLM({ userMessage: msg, systemPrompt, conversationHistory: history });
+    if (llmReply) {
+      assistantResponse = llmReply;
+    }
   }
 
-  // 2. Personal Finance & Investment Guide Mode
-  else if (mode === 'personal-finance' || msgLower.includes('invest') || msgLower.includes('mutual fund') || msgLower.includes('ppf') || msgLower.includes('fd') || msgLower.includes('nps')) {
-    const comp = generateInvestmentComparison({
-      goal: msgLower.includes('retire') ? 'Retirement Planning' : (msgLower.includes('child') ? 'Child Education' : 'Long-Term Wealth Creation'),
-      horizonYears: msgLower.includes('10') ? 10 : (msgLower.includes('15') ? 15 : 5),
-      monthlyBudget: 5000,
-      riskTolerance: msgLower.includes('safe') ? 'Conservative' : 'Moderate'
-    });
+  // If no external LLM reply, execute deterministic neural-rule knowledge engine
+  if (!assistantResponse) {
 
-    metadata.sources.push(OFFICIAL_SOURCES.SEBI_INVESTOR);
-    metadata.sources.push(OFFICIAL_SOURCES.RBI_KEHTA_HAI);
+    // --------------------------------------------------------------------------
+    // 1. GREETINGS & CAPABILITY DISCOVERY
+    // --------------------------------------------------------------------------
+    if (/^(hi|hello|hey|good\s*(morning|afternoon|evening)|namaste|greetings)\b/i.test(msgLower) || msgLower === 'hi' || msgLower === 'hello') {
+      const docCount = allUserDocs.length;
+      assistantResponse = `### 👋 Welcome to DM Locker Pro Assistant\n\n` +
+        `Hello! I am your intelligent zero-knowledge digital vault assistant. You currently have **${docCount} secure ${docCount === 1 ? 'document' : 'documents'}** deposited in your vault.\n\n` +
+        `Here are key areas where I can assist you right now:\n\n` +
+        `1. 📁 **Check My Vault:** Ask *"What documents do I have?"* or *"Do I have my Aadhaar card uploaded?"*\n` +
+        `2. ⏳ **Smart Expiry Tracking:** Ask *"What documents are expiring soon?"* to review automated renewal alerts.\n` +
+        `3. 🔗 **Secure QR Sharing:** Ask *"How do I share a document with a one-time QR code?"*\n` +
+        `4. 🛡️ **Zero-Knowledge Security:** Ask *"How does client-side encryption protect my files?"*\n` +
+        `5. 🚑 **Emergency Access:** Ask *"How does Dead Man's Switch & 2-of-3 Shamir Secret Sharing work?"*\n` +
+        `6. 📊 **LIC & Financial Analysis:** Ask *"Calculate maturity for LIC Jeevan Labh with ₹5 Lakh sum assured"* or *"Compare PPF vs Mutual Funds"*\n` +
+        `7. 🏥 **Healthcare & Claim Audit:** Ask *"What is a room-rent sub-limit and how does proportional deduction work?"*\n\n` +
+        `What would you like to explore or calculate today?`;
+    }
 
-    assistantResponse = `### 💡 Personal Finance & Investment Comparison Guide\n\n` +
-      `**Goal:** ${comp.goal} | **Horizon:** ${comp.horizonYears} Years | **Risk Profile:** ${comp.riskTolerance}\n\n` +
-      `#### Recommended Comparison Matrix:\n\n` +
-      `1. **Public Provident Fund (PPF):**\n` +
-      `   - **Return:** ${comp.instruments[0].rateEstimate}\n` +
-      `   - **Tax Advantage:** EEE (Sec 80C + tax-free interest + tax-free maturity)\n` +
-      `   - **Best for:** Capital preservation with sovereign zero-risk backing.\n\n` +
-      `2. **Diversified Equity Mutual Funds / Index Funds:**\n` +
-      `   - **Return:** ${comp.instruments[1].rateEstimate}\n` +
-      `   - **Liquidity:** High (open-ended redemption in T+2 days)\n` +
-      `   - **Best for:** Beating inflation over 5+ year horizons. Subject to market fluctuations.\n\n` +
-      `3. **Fixed Deposits (FD):**\n` +
-      `   - **Return:** ${comp.instruments[2].rateEstimate}\n` +
-      `   - **Liquidity:** High with nominal premature break penalty\n` +
-      `   - **Best for:** Short-term goals (< 3 years) where capital must not fluctuate.\n\n` +
-      `4. **Pure Term Life Cover vs Endowment Plans:**\n` +
-      `   - Pure Term Insurance separates protection from investment. It secures dependents with high coverage (₹1 Crore+) at low annual cost, leaving the remaining surplus to grow in compounding equity.\n\n` +
-      `> 📘 **SEBI Investor Advisory:** Never invest in financial products that promise guaranteed returns exceeding sovereign rates without explaining market risk. Verify intermediaries at [SEBI Investor Portal](${OFFICIAL_SOURCES.SEBI_INVESTOR.url}).`;
+    // --------------------------------------------------------------------------
+    // 2. EXPIRY ALERTS & REMINDERS (Prioritized before general listing)
+    // --------------------------------------------------------------------------
+    else if (
+      msgLower.includes('expir') ||
+      msgLower.includes('due date') ||
+      msgLower.includes('reminder') ||
+      msgLower.includes('alert') ||
+      msgLower.includes('validity') ||
+      msgLower.includes('when will my policy expire')
+    ) {
+      const today = new Date();
+      const docsWithExpiry = allUserDocs.filter(d => d.expiry_date);
+
+      if (docsWithExpiry.length === 0) {
+        assistantResponse = `### ⏰ Smart Expiry Tracking & Automated Alerts\n\n` +
+          `None of your currently uploaded documents have an **Expiry Date** configured.\n\n` +
+          `#### How Expiry Alerts Work in DM Locker Pro:\n` +
+          `- **3-Stage Notification System:** Automated reminder emails are dispatched at **30 days**, **7 days**, and **1 day** prior to document expiration.\n` +
+          `- **Autonomous Renewal:** Expiring insurance policies can be renewed automatically through our **TinyFish Web Agent** in the Renewal Center.\n` +
+          `- **Setting an Expiry Date:** Open any document card, click **Edit Details**, and set the statutory expiration date (e.g. for Driving Licenses, Passports, Term Policies, or Vehicle Insurance).`;
+      } else {
+        const expired = [];
+        const expiringSoon = [];
+        const valid = [];
+
+        docsWithExpiry.forEach(d => {
+          const exp = new Date(d.expiry_date);
+          const diffDays = Math.ceil((exp - today) / (1000 * 60 * 60 * 24));
+          const item = { ...d, diffDays };
+          if (diffDays < 0) expired.push(item);
+          else if (diffDays <= 30) expiringSoon.push(item);
+          else valid.push(item);
+        });
+
+        assistantResponse = `### ⏰ Document Expiry & Continuity Audit\n\n`;
+
+        if (expired.length > 0) {
+          assistantResponse += `#### ❌ Already Expired (${expired.length}):\n`;
+          expired.forEach(d => {
+            assistantResponse += `- **${d.title}** — Expired **${Math.abs(d.diffDays)} days ago** (\`${d.expiry_date}\`). *Action: Renew immediately or archive.*\n`;
+          });
+          assistantResponse += `\n`;
+        }
+
+        if (expiringSoon.length > 0) {
+          assistantResponse += `#### ⚠️ Expiring Soon (Next 30 Days - ${expiringSoon.length}):\n`;
+          expiringSoon.forEach(d => {
+            assistantResponse += `- **${d.title}** — Due in **${d.diffDays} days** (\`${d.expiry_date}\`). *Automated email reminders active.*\n`;
+          });
+          assistantResponse += `\n`;
+        }
+
+        if (valid.length > 0) {
+          assistantResponse += `#### ✅ Up-to-Date & Valid (${valid.length}):\n`;
+          valid.forEach(d => {
+            assistantResponse += `- **${d.title}** — Valid for **${d.diffDays} more days** (\`${d.expiry_date}\`)\n`;
+          });
+          assistantResponse += `\n`;
+        }
+
+        assistantResponse += `> 📧 **Email Alerts Status:** Automated background reminders are active for your account. You can trigger automated rate discovery anytime in the **Renewal Center**.`;
+      }
+    }
+
+    // --------------------------------------------------------------------------
+    // 3. VAULT INVENTORY & "WHAT DOCUMENTS DO I HAVE?"
+    // --------------------------------------------------------------------------
+    else if (
+      msgLower.includes('what document') ||
+      msgLower.includes('list document') ||
+      msgLower.includes('show my document') ||
+      msgLower.includes('my vault') ||
+      msgLower.includes('show my file') ||
+      msgLower.includes('what files') ||
+      msgLower.includes('all documents') ||
+      msgLower.includes('check my vault')
+    ) {
+      if (allUserDocs.length === 0) {
+        assistantResponse = `### 📂 Your Vault is Currently Empty\n\n` +
+          `You have not deposited any documents into DM Locker Pro yet.\n\n` +
+          `#### How to Deposit Your First Document:\n` +
+          `1. Go to **My Vault** from the sidebar menu.\n` +
+          `2. Click the **"Deposit Document"** button at the top right.\n` +
+          `3. Select your file (PDF, PNG, JPG, or DOCX).\n` +
+          `4. Choose a category (**Identity**, **Healthcare**, **Finance & Insurance**, or **Career & Education**).\n` +
+          `5. Enter optional policy numbers and expiration dates for automated reminder alerts.\n` +
+          `6. Your browser immediately derives your 256-bit AES-GCM key and encrypts the file before uploading!`;
+      } else {
+        // Group documents by category
+        const categories = {};
+        allUserDocs.forEach(d => {
+          const cat = d.category || 'General & Uncategorized';
+          if (!categories[cat]) categories[cat] = [];
+          categories[cat].push(d);
+        });
+
+        assistantResponse = `### 🛡️ Your Secure Vault Inventory (${allUserDocs.length} Total Documents)\n\n` +
+          `Here is an overview of your encrypted documents stored in DM Locker Pro:\n\n`;
+
+        for (const [catName, docs] of Object.entries(categories)) {
+          assistantResponse += `#### 📁 ${catName} (${docs.length})\n`;
+          docs.forEach(doc => {
+            const statusBadge = doc.status === 'expired' ? '❌ *Expired*' : (doc.status === 'expiring_soon' ? '⚠️ *Expiring Soon*' : '✅ *Active*');
+            const expiryInfo = doc.expiry_date ? ` | Expires: \`${doc.expiry_date}\`` : '';
+            const insurerInfo = doc.insurer_name ? ` (${doc.insurer_name})` : '';
+            assistantResponse += `- **${doc.title}**${insurerInfo} — ${statusBadge}${expiryInfo}\n`;
+          });
+          assistantResponse += `\n`;
+        }
+
+        assistantResponse += `> 💡 **Zero-Knowledge Guarantee:** The server stores these files purely as AES-256-GCM encrypted byte payloads. Decryption occurs exclusively in your browser session using your master passphrase.`;
+      }
+    }
+
+    // --------------------------------------------------------------------------
+    // 4. SPECIFIC DOCUMENT AUDIT ("DO I HAVE MY...")
+    // --------------------------------------------------------------------------
+    else if (
+      msgLower.includes('do i have') ||
+      msgLower.includes('is my') ||
+      msgLower.includes('have i uploaded') ||
+      msgLower.includes('find my') ||
+      msgLower.includes('search for')
+    ) {
+      const searchTerms = ['pan', 'aadhaar', 'passport', 'voter', 'driving', 'license', 'degree', '10th', '12th', 'resume', 'cv', 'health insurance', 'life insurance', 'tax'];
+      const matchedTerm = searchTerms.find(term => msgLower.includes(term));
+
+      if (matchedTerm) {
+        const matches = allUserDocs.filter(d => {
+          const str = `${d.title} ${d.category} ${d.file_name || ''}`.toLowerCase();
+          return str.includes(matchedTerm);
+        });
+
+        if (matches.length > 0) {
+          assistantResponse = `### 🔍 Document Search Result for "${matchedTerm.toUpperCase()}"\n\n` +
+            `Yes! I found **${matches.length} matching record(s)** in your secure vault:\n\n` +
+            matches.map(m => `- **${m.title}**\n  - Category: \`${m.category}\`\n  - Status: \`${m.status || 'Active'}\`\n  - Uploaded: ${new Date(m.created_at).toLocaleDateString()}`).join('\n\n') +
+            `\n\n> You can view or download the decrypted file directly from the **My Vault** screen.`;
+        } else {
+          assistantResponse = `### 🔍 Document Search Result for "${matchedTerm.toUpperCase()}"\n\n` +
+            `No document matching **"${matchedTerm.toUpperCase()}"** was found in your vault.\n\n` +
+            `#### Recommended Action:\n` +
+            `Would you like to upload it now? Navigate to **My Vault** -> **Deposit Document** and select the appropriate workspace (e.g. **Identity & Government ID** or **Education & Academics**).`;
+        }
+      } else {
+        assistantResponse = `### 🔍 Document Search\n\n` +
+          `To check for a specific document, mention its name (e.g. *"Do I have my PAN card?"*, *"Is my degree uploaded?"*, or *"Find my health insurance"*).\n\n` +
+          `Your vault currently holds **${allUserDocs.length} total documents**.`;
+      }
+    }
+
+    // --------------------------------------------------------------------------
+    // 5. QR CODE SHARING & ONE-TIME LINKS
+    // --------------------------------------------------------------------------
+    else if (
+      msgLower.includes('qr') ||
+      msgLower.includes('share') ||
+      msgLower.includes('one-time link') ||
+      msgLower.includes('temporary link')
+    ) {
+      assistantResponse = `### 📲 Genuine Zero-Knowledge QR Document Sharing\n\n` +
+        `DM Locker Pro provides temporary, cryptographic QR code sharing that protects your files when presenting them to verifiers, banks, or employers.\n\n` +
+        `#### Step-by-Step Sharing Workflow:\n` +
+        `1. **Select Document:** Open **My Vault** and click the **Share via QR** button on the document card.\n` +
+        `2. **Set Expiration Interval:** Choose between:\n` +
+        `   - **15 Minutes** (for instant counter verification)\n` +
+        `   - **1 Hour** (for appointment/interview sessions)\n` +
+        `   - **24 Hours** (for multi-stage loan or admissions approvals)\n` +
+        `   - **Single View Only (Burn After Reading)** (token self-destructs the moment the document is loaded)\n` +
+        `3. **Optional PIN Verification:** Set an optional **4-digit numeric access PIN** that you communicate verbally to the recipient.\n` +
+        `4. **Scan or Share Link:** The recipient scans the QR code from their mobile device. The client browser securely retrieves the ciphertext and decrypts it on-the-fly.\n\n` +
+        `> 🔒 **Security Feature:** Sharing tokens are ephemeral. Once the duration expires or a single-view token is consumed, the database purges access rights immediately.`;
+    }
+
+    // --------------------------------------------------------------------------
+    // 6. CLIENT-SIDE ENCRYPTION & PRIVACY MODEL
+    // --------------------------------------------------------------------------
+    else if (
+      msgLower.includes('encryption') ||
+      msgLower.includes('zero knowledge') ||
+      msgLower.includes('zero-knowledge') ||
+      msgLower.includes('how does encryption work') ||
+      msgLower.includes('is my data safe') ||
+      msgLower.includes('security') ||
+      msgLower.includes('pbkdf2') ||
+      msgLower.includes('aes')
+    ) {
+      assistantResponse = `### 🛡️ DM Locker Pro Zero-Knowledge Cryptographic Architecture\n\n` +
+        `DM Locker Pro is engineered on a strict **Zero-Knowledge** foundation where your raw documents and master passphrase never leave your device unencrypted.\n\n` +
+        `#### The 4-Stage Cryptographic Pipeline:\n\n` +
+        `1. **Client-Side Key Derivation (PBKDF2):**\n` +
+        `   - When you log in, Web Crypto computes a 256-bit symmetric AES key using **PBKDF2-HMAC-SHA256** with **100,000 iterations**.\n` +
+        `   - A unique 16-byte cryptographic \`vault_salt\` ensures immunity against rainbow tables.\n` +
+        `   - This vault key is held purely in browser RAM during your authenticated session.\n\n` +
+        `2. **Authenticated Symmetric Encryption (AES-256-GCM):**\n` +
+        `   - Each document upload generates a cryptographically secure random **12-byte (96-bit) Initialization Vector (IV)**.\n` +
+        `   - The file payload is encrypted locally into ciphertext with a **128-bit GCM authentication tag** preventing tampering.\n\n` +
+        `3. **Zero Plaintext Transmission:**\n` +
+        `   - The server only receives and stores the high-entropy ciphertext payload and IV metadata.\n` +
+        `   - Your master passphrase and raw plaintext files **never** travel across the wire or touch server storage.\n\n` +
+        `4. **Adversary Immunity:**\n` +
+        `   - Even if the SQLite database is compromised or an attacker inspects server memory, all document payloads remain mathematically undecipherable without the client passphrase.`;
+    }
+
+    // --------------------------------------------------------------------------
+    // 7. DEAD MAN'S SWITCH & EMERGENCY PROTOCOL
+    // --------------------------------------------------------------------------
+    else if (
+      msgLower.includes('dead man') ||
+      msgLower.includes('deadman') ||
+      msgLower.includes('emergency switch') ||
+      msgLower.includes('inactivity') ||
+      msgLower.includes('what if i die') ||
+      msgLower.includes('heartbeat')
+    ) {
+      assistantResponse = `### ⏳ Emergency Access: Dead Man's Switch Protocol\n\n` +
+        `The Dead Man's Switch guarantees digital asset and insurance continuity for your family if you are incapacitated or unavailable.\n\n` +
+        `#### How the Inactivity Mechanism Works:\n` +
+        `1. **Configurable Tolerance Window:** Set a heartbeat threshold (e.g. **15, 30, 60, or 90 days**).\n` +
+        `2. **Zero-Effort Check-In:** Every time you log in, view a file, or click **"I'm Active / Check In"**, your heartbeat timestamp resets.\n` +
+        `3. **Multi-Stage Grace Period:** If the tolerance window nears expiration, the system dispatches warning notifications via registered email.\n` +
+        `4. **Emergency Trigger & Handover:** If no check-in occurs after the grace period:\n` +
+        `   - The designated **Nominee** receives an emergency handover alert.\n` +
+        `   - The server escrow share is released to combine with the nominee share under **2-of-3 Shamir's Secret Sharing**.\n\n` +
+        `You can configure your nominee and check-in tolerance from the **Emergency Access** page.`;
+    }
+
+    // --------------------------------------------------------------------------
+    // 8. 2-OF-3 SHAMIR'S SECRET SHARING
+    // --------------------------------------------------------------------------
+    else if (
+      msgLower.includes('shamir') ||
+      msgLower.includes('secret sharing') ||
+      msgLower.includes('2 of 3') ||
+      msgLower.includes('2-of-3') ||
+      msgLower.includes('shares') ||
+      msgLower.includes('threshold') ||
+      msgLower.includes('galois')
+    ) {
+      assistantResponse = `### 🧩 Mathematical 2-of-3 Shamir's Secret Sharing Explained\n\n` +
+        `To eliminate single points of failure without compromising privacy, DM Locker Pro implements a mathematically verified **$(k, n) = (2, 3)$ Shamir Threshold Scheme** over Galois Field $GF(2^8)$.\n\n` +
+        `#### The 3 Distributed Shares:\n` +
+        `- **Share 1 (User Offline Key):** Stored by you as an emergency paper backup or offline encrypted phrase.\n` +
+        `- **Share 2 (Nominee Share):** Provided to your trusted nominee/family custodian.\n` +
+        `- **Share 3 (Server Escrow Share):** Encrypted and locked in the server database, released only when the Dead Man's Switch fires.\n\n` +
+        `#### The Mathematical Guarantee:\n` +
+        `- **Any 2 Shares Reconstruct the Vault Key:**\n` +
+        `  - *(User + Nominee)* = Instant manual emergency unlock.\n` +
+        `  - *(Nominee + Server Escrow)* = Automated post-inactivity unlock.\n` +
+        `  - *(User + Server Escrow)* = Self-recovery if nominee key is lost.\n` +
+        `- **1 Share Alone Yields Zero Information:** Having only 1 share is mathematically equivalent to a random guess. The server cannot decrypt documents on its own, and a rogue nominee cannot access files while you are active.\n\n` +
+        `You can run an interactive verification benchmark directly on the **Emergency Access** screen.`;
+    }
+
+    // --------------------------------------------------------------------------
+    // 9. ROOM-RENT SUB-LIMITS & PROPORTIONAL DEDUCTIONS (SPECIFIC DEEP DIVE)
+    // --------------------------------------------------------------------------
+    else if (
+      msgLower.includes('room rent') ||
+      msgLower.includes('sub limit') ||
+      msgLower.includes('sub-limit') ||
+      msgLower.includes('proportional deduction') ||
+      msgLower.includes('room-rent')
+    ) {
+      metadata.sources.push(OFFICIAL_SOURCES.IRDAI_CONSUMER);
+      assistantResponse = `### 🏥 Room-Rent Sub-Limits & The Proportional Deduction Trap\n\n` +
+        `The **Room Rent Sub-Limit** is one of the most critical health insurance clauses to audit because it triggers heavy financial penalties through **Proportional Deductions**.\n\n` +
+        `#### The Numerical Example (How You Lose Money):\n` +
+        `Assume you have a health insurance policy with:\n` +
+        `- **Sum Insured:** ₹5,00,000\n` +
+        `- **Room Rent Cap:** 1% of Sum Insured = **₹5,000 per day**\n` +
+        `- **Actual Room Selected:** Deluxe Room at **₹10,000 per day** (2x the eligible limit)\n\n` +
+        `#### What Most People Think Happens:\n` +
+        `They assume they will only pay the difference in room rent: $(₹10,000 - ₹5,000) \\times 4\\text{ days} = ₹20,000$.\n\n` +
+        `#### What Actually Happens (Proportional Deduction):\n` +
+        `Under IRDAI standard terms, the insurer scales down **all associated hospital expenses** proportional to the room rent ratio:\n` +
+        `$$\\text{Eligible Ratio} = \\frac{\\text{Eligible Room Rent}}{\\text{Actual Room Rent}} = \\frac{₹5,000}{₹10,000} = 50\\%$$\n\n` +
+        `If your total bill is **₹3,00,000** consisting of:\n` +
+        `- Doctor & Surgeon Fees: ₹1,20,000 -> Insurer pays only **50% (₹60,000)**!\n` +
+        `- Operation Theatre & ICU: ₹1,00,000 -> Insurer pays only **50% (₹50,000)**!\n` +
+        `- Room Charges (4 days): ₹40,000 -> Insurer pays **₹20,000**\n` +
+        `- Consumables/Medicines: ₹40,000 -> (Non-medical excluded)\n\n` +
+        `💥 **Result:** Instead of paying ₹20,000, you are hit with an out-of-pocket bill exceeding **₹1,50,000**!\n\n` +
+        `#### How to Protect Yourself:\n` +
+        `1. Choose policies with **"No Room Rent Sub-Limit"** or "Single Private A/C Room" entitlement.\n` +
+        `2. If your policy has a 1% cap, strictly choose rooms within that exact tariff limit during planned admissions.\n` +
+        `3. Use our **Policy Health Check** to audit your health policy for sub-limit flags.`;
+    }
+
+    // --------------------------------------------------------------------------
+    // 10. CASHLESS HOSPITALIZATION & ABHA PREPARATION
+    // --------------------------------------------------------------------------
+    else if (
+      msgLower.includes('cashless') ||
+      msgLower.includes('hospitalization') ||
+      msgLower.includes('hospital') ||
+      msgLower.includes('tpa') ||
+      msgLower.includes('ayushman') ||
+      msgLower.includes('abha')
+    ) {
+      metadata.sources.push(OFFICIAL_SOURCES.ABHA_HEALTH);
+      metadata.sources.push(OFFICIAL_SOURCES.IRDAI_CONSUMER);
+
+      assistantResponse = `### 🏥 Cashless Hospitalization & Claim Preparation Checklist\n\n` +
+        `To ensure a smooth cashless claim without out-of-pocket delays, prepare these documents before hospital admission:\n\n` +
+        `#### Required Document Dossier:\n` +
+        `1. 🪪 **ABHA Health ID Card:** Integrates your longitudinal medical records across network hospitals ([ABDM Portal](${OFFICIAL_SOURCES.ABHA_HEALTH.url})).\n` +
+        `2. 📄 **TPA e-Health Card & Active Policy Schedule:** Available in your **Healthcare Records** workspace.\n` +
+        `3. 🆔 **Government Photo ID:** Aadhaar Card or PAN Card matching the exact policyholder legal name.\n` +
+        `4. 🩺 **Doctor's Admission Advice & Prescription:** Stating the tentative diagnosis and reason for hospitalization.\n` +
+        `5. 🧪 **Past Diagnostic Reports:** Lab tests, X-rays, or MRI scans leading to the admission decision.\n\n` +
+        `#### Crucial Timing Rules:\n` +
+        `- **Planned Hospitalization:** Submit the pre-authorization form to the hospital TPA desk **48 to 72 hours before admission**.\n` +
+        `- **Emergency Hospitalization:** Notify the insurer and submit the pre-auth request within **24 hours of hospital admission**.\n` +
+        `- **Consumables Clause:** Ask if your policy covers non-medical consumables (cotton, gloves, PPE, syringes); otherwise expect ₹5,000 - ₹15,000 out-of-pocket charges.`;
+    }
+
+    // --------------------------------------------------------------------------
+    // 11. TERM INSURANCE VS ENDOWMENT PLANS (UNBIASED FINANCIAL COMPARISON)
+    // --------------------------------------------------------------------------
+    else if (
+      msgLower.includes('term insurance vs') ||
+      msgLower.includes('endowment vs') ||
+      msgLower.includes('pure term') ||
+      msgLower.includes('difference between term') ||
+      msgLower.includes('lic vs term')
+    ) {
+      metadata.sources.push(OFFICIAL_SOURCES.SEBI_INVESTOR);
+      metadata.sources.push(OFFICIAL_SOURCES.IRDAI_CONSUMER);
+
+      assistantResponse = `### ⚖️ Pure Term Insurance vs Traditional Endowment Plans\n\n` +
+        `One of the most important financial literacy principles recommended by SEBI and IRDAI is to **keep insurance (protection) strictly separate from investment (wealth creation)**.\n\n` +
+        `| Feature | Pure Term Life Insurance | Traditional Endowment Plan (e.g. LIC 914/936) |\n` +
+        `|---|---|---|\n` +
+        `| **Core Purpose** | 100% Pure Financial Protection | Mixed Insurance + Low-Yield Savings |\n` +
+        `| **Coverage for ₹10k-15k/yr** | **₹1 Crore (100 Lakhs)** | ~₹2.5 to ₹3.5 Lakhs |\n` +
+        `| **Payout if Insured Survives** | ₹0 (Pure risk transfer) | Sum Assured + Accrued Bonuses |\n` +
+        `| **Net Annualized Return (IRR)** | N/A (Risk protection) | Typically **4.5% to 5.5%** (often below inflation) |\n` +
+        `| **Liquidity & Flexibility** | High (Can stop anytime without loss) | Low (Surrender value penalty in first 3-5 yrs) |\n\n` +
+        `#### The "Buy Term + Invest the Difference" Strategy:\n` +
+        `- Instead of paying ₹50,000/year for an endowment policy with only ₹10 Lakhs life cover:\n` +
+        `- Buy a **₹1 Crore Pure Term Policy** for ~₹12,000/year.\n` +
+        `- Invest the remaining **₹38,000/year** in PPF (7.1% tax-free) or Nifty 50 Index Mutual Funds (11-12% historical return).\n` +
+        `- **Over 20 Years:** The compounding equity portfolio grows to **₹30+ Lakhs**, compared to just ~₹18-20 Lakhs under an endowment policy, while your family enjoys **10x higher life cover** throughout!`;
+    }
+
+    // --------------------------------------------------------------------------
+    // 12. LIC MATURITY CALCULATOR & PLAN EVALUATION
+    // --------------------------------------------------------------------------
+    else if (
+      mode === 'lic-calculator' ||
+      msgLower.includes('lic') ||
+      msgLower.includes('maturity') ||
+      msgLower.includes('jeevan') ||
+      msgLower.includes('table 914') ||
+      msgLower.includes('table 936') ||
+      msgLower.includes('table 945')
+    ) {
+      const saMatch = userMessage.match(/(?:sa|sum assured|cover)\D*(\d[\d,]+)/i);
+      const termMatch = userMessage.match(/(?:term|years)\D*(\d{1,2})/i);
+      const premiumMatch = userMessage.match(/(?:premium|paying)\D*(\d[\d,]+)/i);
+
+      const sa = saMatch ? parseInt(saMatch[1].replace(/,/g, ''), 10) : 500000;
+      const term = termMatch ? parseInt(termMatch[1], 10) : 21;
+      const premium = premiumMatch ? parseInt(premiumMatch[1].replace(/,/g, ''), 10) : 24000;
+
+      const calcResult = computeLicMaturity({
+        planNumber: msgLower.includes('914') ? '914' : (msgLower.includes('945') ? '945' : '936'),
+        planName: 'LIC Policy (Jeevan Labh / Endowment Analysis)',
+        sumAssured: sa,
+        policyTerm: term,
+        premiumPayingTerm: Math.min(term, 15),
+        annualPremium: premium
+      });
+
+      metadata.calculationSteps = calcResult.calculationSteps;
+      metadata.sources.push(OFFICIAL_SOURCES.LIC_POLICY_CONDITIONS);
+      metadata.sources.push(OFFICIAL_SOURCES.IRDAI_CONSUMER);
+
+      assistantResponse = `### 📊 LIC Policy Maturity & Net IRR Yield Analysis\n\n` +
+        `**Plan Evaluated:** ${calcResult.planDetails.planName}\n` +
+        `**Parameters:** Sum Assured: ₹${sa.toLocaleString('en-IN')} | Term: ${term} Yrs | Premium: ₹${premium.toLocaleString('en-IN')}/yr\n\n` +
+        `#### Detailed Benefit Breakdown:\n` +
+        `- 🛡️ **Guaranteed Sum Assured:** ₹${calcResult.benefitBreakdown.guaranteedSumAssured.toLocaleString('en-IN')}\n` +
+        `- 📈 **Estimated Simple Reversionary Bonus:** ₹${Math.round(calcResult.benefitBreakdown.simpleReversionaryBonus).toLocaleString('en-IN')} (at ₹${calcResult.benefitBreakdown.bonusRateUsedPer1000}/1000 SA/yr)\n` +
+        `- 🎁 **Estimated Final Additional Bonus (FAB):** ₹${Math.round(calcResult.benefitBreakdown.finalAdditionalBonus).toLocaleString('en-IN')}\n` +
+        `- 💰 **Estimated Total Maturity Payout:** **₹${Math.round(calcResult.benefitBreakdown.estimatedMaturityBenefit).toLocaleString('en-IN')}**\n\n` +
+        `#### Financial Return Evaluation:\n` +
+        `- **Total Premiums to be Paid:** ₹${calcResult.planDetails.totalPremiumsPaid?.toLocaleString('en-IN')}\n` +
+        `- **Net Financial Gain:** ₹${Math.round(calcResult.benefitBreakdown.netGainOverPremiums)?.toLocaleString('en-IN')}\n` +
+        `- **Net Annualized Return (IRR):** **${calcResult.benefitBreakdown.annualizedNetYieldIRR}**\n\n` +
+        `> ℹ️ **Regulatory Disclosure:** Under Section 28 of the LIC Act, simple reversionary bonuses are non-guaranteed and depend on annual actuarial surplus valuations. Official source: [LIC Policy Conditions](${OFFICIAL_SOURCES.LIC_POLICY_CONDITIONS.url}).`;
+    }
+
+    // --------------------------------------------------------------------------
+    // 13. PERSONAL FINANCE, INVESTMENTS & TAX
+    // --------------------------------------------------------------------------
+    else if (
+      mode === 'personal-finance' ||
+      msgLower.includes('invest') ||
+      msgLower.includes('mutual fund') ||
+      msgLower.includes('ppf') ||
+      msgLower.includes('fd') ||
+      msgLower.includes('nps') ||
+      msgLower.includes('stocks') ||
+      msgLower.includes('sip')
+    ) {
+      const comp = generateInvestmentComparison({
+        goal: msgLower.includes('retire') ? 'Retirement Planning' : (msgLower.includes('child') ? 'Child Education' : 'Long-Term Wealth Creation'),
+        horizonYears: msgLower.includes('10') ? 10 : (msgLower.includes('15') ? 15 : 5),
+        monthlyBudget: 5000,
+        riskTolerance: msgLower.includes('safe') ? 'Conservative' : 'Moderate'
+      });
+
+      metadata.sources.push(OFFICIAL_SOURCES.SEBI_INVESTOR);
+      metadata.sources.push(OFFICIAL_SOURCES.RBI_KEHTA_HAI);
+
+      assistantResponse = `### 💡 Personal Finance & Goal-Based Asset Allocation Guide\n\n` +
+        `**Goal:** ${comp.goal} | **Horizon:** ${comp.horizonYears} Years | **Risk Profile:** ${comp.riskTolerance}\n\n` +
+        `#### Comparison of Key Investment Instruments:\n\n` +
+        `1. **Public Provident Fund (PPF):**\n` +
+        `   - **Return:** 7.1% p.a. (Sovereign guarantee)\n` +
+        `   - **Tax Status:** EEE (Exempt at investment Sec 80C, exempt interest, exempt maturity)\n` +
+        `   - **Best for:** Capital preservation with 15-year lock-in.\n\n` +
+        `2. **Diversified Equity Mutual Funds / Index Funds (SIP):**\n` +
+        `   - **Historical Return:** 11% - 13% CAGR (Over 5+ year horizons)\n` +
+        `   - **Liquidity:** T+2 days redemption without lock-in\n` +
+        `   - **Best for:** Beating inflation and building long-term wealth.\n\n` +
+        `3. **Fixed Deposits (FD):**\n` +
+        `   - **Return:** 6.5% - 7.5% p.a.\n` +
+        `   - **Best for:** Short-term emergency funds (< 3 years).\n\n` +
+        `4. **National Pension System (NPS):**\n` +
+        `   - **Advantage:** Additional ₹50,000 tax deduction under Sec 80CCD(1B) beyond the 80C ₹1.5 Lakh limit.\n\n` +
+        `> 📘 **SEBI Investor Rule:** Always secure a 3-6 month liquid emergency fund in a savings account before locking capital into volatile equity instruments.`;
+    }
+
+    // --------------------------------------------------------------------------
+    // 14. JOB APPLICATION DOCUMENT AUDIT & DEGREE QUESTIONS
+    // --------------------------------------------------------------------------
+    else if (
+      mode === 'job-gap-checker' ||
+      msgLower.includes('job') ||
+      msgLower.includes('resume') ||
+      msgLower.includes('recruitment') ||
+      msgLower.includes('marksheet') ||
+      msgLower.includes('degree') ||
+      msgLower.includes('provisional') ||
+      msgLower.includes('upsc') ||
+      msgLower.includes('ssc')
+    ) {
+      if (msgLower.includes('provisional')) {
+        assistantResponse = `### 🎓 Provisional Degree vs Original Degree Validity\n\n` +
+          `**Yes, a Provisional Degree Certificate is legally valid for employment and government exams!**\n\n` +
+          `#### Key Rules Recognized by UGC, UPSC, SSC, and Corporates:\n` +
+          `1. **Validity Period:** A provisional certificate is universally accepted until the official university convocation is held and the original degree is conferred.\n` +
+          `2. **Mandatory Elements:** Ensure your provisional certificate has:\n` +
+          `   - Official university seal and registrar signature.\n` +
+          `   - Clear roll number / registration number and date of passing.\n` +
+          `   - Division / CGPA or class awarded.\n` +
+          `3. **Final Transcripts:** Always attach final semester consolidated marksheets alongside the provisional certificate.`;
+      } else {
+        const jobCheck = checkJobApplicationRequirements(userMessage, allUserDocs);
+        metadata.sources.push({ title: 'National Career Service Portal', url: 'https://www.ncs.gov.in/', authority: 'Ministry of Labour & Employment' });
+
+        assistantResponse = `### 📋 Job Application Document Readiness Evaluation\n\n` +
+          `**Vault Documents Evaluated:** ${allUserDocs.length} | **Application Readiness:** **${jobCheck.readinessScore}%**\n` +
+          `- ✅ **Available in Vault:** ${jobCheck.availableCount}\n` +
+          `- ⚠️ **Missing Required Certificates:** ${jobCheck.missingMandatoryCount}\n\n` +
+          `#### Requirements Breakdown:\n` +
+          jobCheck.requirements.map(r => {
+            const icon = r.status === 'Available' ? '✅' : (r.status === 'Missing' ? '❌' : 'ℹ️');
+            return `- ${icon} **${r.title}** — **Status: ${r.status}**\n  *Why required:* ${r.reason}` +
+              (r.matchedDocument ? `\n  *Found in Vault:* "${r.matchedDocument.title}"` : '');
+          }).join('\n\n') +
+          `\n\n> 💡 **Tip:** Upload any missing documents to the **Career & Education** workspace to achieve 100% application readiness.`;
+      }
+    }
+
+    // --------------------------------------------------------------------------
+    // 15. VAULT ORGANIZER & UNDO SUPPORT
+    // --------------------------------------------------------------------------
+    else if (
+      mode === 'vault-organizer' ||
+      msgLower.includes('organize') ||
+      msgLower.includes('folder') ||
+      msgLower.includes('sort') ||
+      msgLower.includes('undo') ||
+      msgLower.includes('category')
+    ) {
+      assistantResponse = `### 🗂️ Smart Vault Organization & Undo Support\n\n` +
+        `DM Locker Pro helps you keep your records clean with standardized category folders and automated tagging.\n\n` +
+        `#### Organization Features:\n` +
+        `- **4 Standardized Workspaces:** Documents are automatically segmented into **Identity & Government ID**, **Healthcare & Medical**, **Finance & Insurance**, and **Career & Education**.\n` +
+        `- **Bulk Moves & Undo:** You can select multiple documents in **My Vault** and assign them to folders. Every reorganization is logged with a 1-click **Undo** option so you can revert any accidental folder change.\n` +
+        `- **Automated Policy Tagging:** The system detects policy numbers, insurer names, and vehicle registration numbers from filenames to auto-fill metadata fields.`;
+    }
+
+    // --------------------------------------------------------------------------
+    // 16. SETTINGS, PASSWORDS, THEMES & SALT EXPORT
+    // --------------------------------------------------------------------------
+    else if (
+      msgLower.includes('password') ||
+      msgLower.includes('theme') ||
+      msgLower.includes('dark mode') ||
+      msgLower.includes('salt') ||
+      msgLower.includes('delete account')
+    ) {
+      assistantResponse = `### ⚙️ Account Settings & Security Controls\n\n` +
+        `You can manage your credentials and app preferences directly in **Settings**:\n\n` +
+        `- 🎨 **Theme Preferences:** Choose between **Light** (warm alabaster), **Dark** (deep charcoal), or **System** (OS sync). The permanent theme switcher is also pinned to the bottom of your sidebar.\n` +
+        `- 🔑 **Master Passphrase:** Update your passphrase from the account settings. Note that updating your passphrase re-derives your client vault key.\n` +
+        `- 📦 **Export Vault Salt:** Download your unique cryptographic salt string to preserve key derivation parameters.\n` +
+        `- 🗑️ **Account Purge:** Confirmed account deletion destroys all stored ciphertext records and audit logs permanently.`;
+    }
+
+    // --------------------------------------------------------------------------
+    // 17. AUTONOMOUS WEB AGENT (TINYFISH)
+    // --------------------------------------------------------------------------
+    else if (
+      msgLower.includes('tinyfish') ||
+      msgLower.includes('renewal agent') ||
+      msgLower.includes('renew') ||
+      msgLower.includes('autonomous agent')
+    ) {
+      assistantResponse = `### 🤖 TinyFish Autonomous Policy Renewal Agent\n\n` +
+        `DM Locker Pro features integration with the **TinyFish Autonomous Web Agent** to eliminate the manual hassle of policy renewals.\n\n` +
+        `#### How the Agent Works:\n` +
+        `1. **Trigger Renewal:** In the **Renewal Center**, select an expiring motor, health, or term policy.\n` +
+        `2. **Autonomous Browser Navigation:** The TinyFish agent autonomously navigates underwriter portals, parses current renewal quote schedules, and retrieves updated premium figures.\n` +
+        `3. **Live Telemetry Stream:** Watch real-time execution steps and screenshots directly in the dashboard.\n` +
+        `4. **Version Promotion:** Once you approve the quote, the agent promotes the renewed document as a new version while preserving the old policy for claims history.\n` +
+        `5. **Transparent Simulation Mode:** If no live API key is configured, the system runs transparently in verified mock portal mode with an explicit development simulation badge.`;
+    }
+
+    // --------------------------------------------------------------------------
+    // 18. GENERAL ASSISTANT FALLBACK
+    // --------------------------------------------------------------------------
+    else {
+      assistantResponse = `### 🛡️ DM Locker Pro Assistant\n\n` +
+        `I understood your inquiry regarding **"${msg.slice(0, 50)}"**.\n\n` +
+        `Here are the most relevant ways I can assist you:\n\n` +
+        `- 📂 **Check My Vault:** Ask *"What documents do I have in my vault?"* or *"Do I have my PAN card uploaded?"*\n` +
+        `- ⏳ **Expiry & Renewals:** Ask *"What documents are expiring soon?"* to see countdowns and alert dates.\n` +
+        `- 📲 **QR Code Sharing:** Ask *"How do I share a document with a one-time QR code?"*\n` +
+        `- 🛡️ **Zero-Knowledge Security:** Ask *"How does client-side AES-256-GCM encryption work?"*\n` +
+        `- 🚑 **Emergency Access:** Ask *"How does Dead Man's Switch & 2-of-3 Shamir Secret Sharing work?"*\n` +
+        `- 📊 **LIC & Investments:** Ask *"Calculate maturity for LIC Jeevan Labh"* or *"Compare PPF vs Mutual Funds"*\n` +
+        `- 🏥 **Healthcare & Policies:** Ask *"What is a room-rent sub-limit and how does proportional deduction work?"*\n\n` +
+        `Feel free to ask any of the questions above or type your specific question!`;
+    }
   }
 
-  // 3. Job Application Document Checker Mode
-  else if (mode === 'job-gap-checker' || msgLower.includes('job') || msgLower.includes('resume') || msgLower.includes('recruitment') || msgLower.includes('marksheet')) {
-    const jobCheck = checkJobApplicationRequirements(userMessage, authorizedDocs);
-    metadata.sources.push({ title: 'National Career Service Portal', url: 'https://www.ncs.gov.in/', authority: 'Ministry of Labour & Employment' });
-
-    assistantResponse = `### 📋 Job Application Document Gap Evaluation\n\n` +
-      `**Vault Documents Evaluated:** ${authorizedDocs.length} | **Readiness Score:** ${jobCheck.readinessScore}%\n` +
-      `- ✅ **Available Documents:** ${jobCheck.availableCount}\n` +
-      `- ⚠️ **Missing Required Documents:** ${jobCheck.missingMandatoryCount}\n\n` +
-      `#### Checklist Breakdown:\n` +
-      jobCheck.requirements.map(r => {
-        const icon = r.status === 'Available' ? '✅' : (r.status === 'Missing' ? '❌' : 'ℹ️');
-        return `- ${icon} **${r.title}** — **Status: ${r.status}**\n  *Why required:* ${r.reason}` +
-          (r.matchedDocument ? `\n  *Matched in Vault:* "${r.matchedDocument.title}"` : '');
-      }).join('\n\n') +
-      `\n\n> 💡 **Next Steps:** Upload your missing certificates to the **Career & Education** workspace to achieve 100% application readiness.`;
-  }
-
-  // 4. Healthcare Mode
-  else if (mode === 'healthcare' || msgLower.includes('health') || msgLower.includes('hospital') || msgLower.includes('doctor') || msgLower.includes('medical') || msgLower.includes('ayushman')) {
-    metadata.sources.push(OFFICIAL_SOURCES.ABHA_HEALTH);
-    metadata.sources.push(OFFICIAL_SOURCES.IRDAI_CONSUMER);
-
-    assistantResponse = `### 🏥 Healthcare Records & Health Insurance Assistant\n\n` +
-      `Your healthcare documents are stored in a dedicated, client-side zero-knowledge workspace.\n\n` +
-      `#### Key Healthcare Document Checklist:\n` +
-      `- 🪪 **ABHA Health ID Card:** Integrates your longitudinal health history with national hospitals ([ABDM Portal](${OFFICIAL_SOURCES.ABHA_HEALTH.url})).\n` +
-      `- 📄 **Active Health Insurance Policy & TPA Card:** Ensure policy is active and keep e-cashless cards ready.\n` +
-      `- 📋 **Pre-Existing Disease (PED) Diagnostic Records:** Preserve discharge summaries and medical prescriptions.\n` +
-      `- 💉 **Vaccination & Preventive Records:** Digital certificates for travel and occupational health compliance.\n\n` +
-      `#### Critical Insurance Clauses to Audit:\n` +
-      `- **Room Rent Sub-Limit:** Avoid proportional deduction penalties by verifying room category entitlements.\n` +
-      `- **Co-Payment:** Check if you must bear 10%-20% of every approved claim out of pocket.\n` +
-      `- **Waiting Periods:** Standard pre-existing conditions typically require 24 to 36 months of continuous coverage.\n\n` +
-      `> ⚠️ **Medical Disclaimer:** DM Assistant provides administrative document guidance and policy terms explanation. It **never** diagnoses conditions or replaces qualified medical advice from registered doctors.`;
-  }
-
-  // 5. Smart Vault Organizer Mode
-  else if (mode === 'vault-organizer' || msgLower.includes('organize') || msgLower.includes('folder') || msgLower.includes('sort')) {
-    assistantResponse = `### 🗂️ Smart Vault Organization Summary\n\n` +
-      `Your vault currently houses **${authorizedDocs.length} active documents** across standardized secure folders.\n\n` +
-      `#### Recommended Organization Actions:\n` +
-      `- **Categorization Check:** Documents with generic names can be moved into their dedicated workspaces (**Healthcare**, **Finance & Insurance**, or **Career & Education**).\n` +
-      `- **Expiry Tracking:** Verify that dates on policies and government IDs are up-to-date so automated email reminders trigger at 30, 7, and 1 days before expiry.\n` +
-      `- **Tagging:** Add custom tags like \`Tax2026\`, \`FamilyCover\`, or \`JobReady\` for fast instant filtering.\n\n` +
-      `You can perform bulk folder reorganization with complete undo support from the **My Vault** screen.`;
-  }
-
-  // 6. General Document Assistant
-  else {
-    assistantResponse = `### 🛡️ DM Locker Pro Assistant\n\n` +
-      `I can help you navigate and analyze your personal documents with full zero-knowledge privacy:\n\n` +
-      `- **Personal Finance & Investment:** Compare PPF, Mutual Funds, Fixed Deposits, and NPS according to your time horizon.\n` +
-      `- **Understand My LIC Policy:** Calculate guaranteed sum assured vs non-guaranteed bonuses and estimated maturity payouts.\n` +
-      `- **Job Application Document Gap Checker:** Paste a job description to audit your degrees, marksheets, and identity certificates.\n` +
-      `- **Healthcare Workspace:** Audit health insurance exclusions, waiting periods, room-rent sub-limits, and ABHA records.\n` +
-      `- **Smart Vault Organization:** Move records into smart folders with one-click bulk actions and rollback support.\n\n` +
-      `How would you like to proceed today?`;
-  }
-
-  // Save to database
+  // Save conversation message exchange in database
   const userMsgId = `msg_${Math.random().toString(36).substring(2, 10)}`;
   const assistantMsgId = `msg_${Math.random().toString(36).substring(2, 10)}`;
 
@@ -648,7 +1218,7 @@ export async function processAssistantMessage({
     VALUES (?, ?, ?, 'assistant', ?, ?, ?)
   `).run(assistantMsgId, conversationId, userId, assistantResponse, JSON.stringify(metadata), now);
 
-  // Update conversation updated_at
+  // Update conversation timestamp
   db.prepare('UPDATE chat_conversations SET updated_at = ? WHERE id = ?').run(now, conversationId);
 
   return {
